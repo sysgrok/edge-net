@@ -1,6 +1,6 @@
 [package]
 name = "edge-mdns"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 description = "Async + `no_std` + no-alloc implementation of an mDNS responder"
 repository = "https://github.com/ivmarkov/edge-net"

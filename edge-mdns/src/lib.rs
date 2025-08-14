@@ -915,8 +915,6 @@ where
                         debug!("Additional answer: [{}]", debug2format!(answer));
 
                         aa.push(answer)?;
-
-                        pushed = true;
                     }
 
                     Ok::<_, MdnsError>(())

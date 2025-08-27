@@ -746,7 +746,10 @@ impl<const P: usize, const B: usize, const N: usize> Server<P, B, N> {
                 .map_err(|_| ()));
         }
 
-        let (result, _) = embassy_futures::select::select_slice(&mut tasks).await;
+        let tasks = pin!(tasks);
+
+        let tasks = unsafe { tasks.map_unchecked_mut(|t| t.as_mut_slice()) };
+        let (result, _) = embassy_futures::select::select_slice(tasks).await;
 
         warn!(
             "Server processing loop quit abruptly: {:?}",

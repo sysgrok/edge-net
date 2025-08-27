@@ -108,7 +108,7 @@ members = [
 ]
 
 [workspace.dependencies]
-embassy-futures = { version = "0.1", default-features = false }
+embassy-futures = { version = "0.1.2", default-features = false }
 embassy-sync = { version = "0.7", default-features = false }
 embassy-time = { version = "0.4", default-features = false }
 embedded-io-async = { version = "0.6", default-features = false }

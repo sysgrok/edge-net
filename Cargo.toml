@@ -41,7 +41,7 @@ env_logger = "0.10"
 embedded-io-async = "0.6"
 embassy-time = { version = "0.4", features = ["std", "generic-queue-64"] }
 embassy-sync = "0.7"
-embassy-futures = "0.1"
+embassy-futures = "0.1.2"
 embedded-svc = { version = "0.28", features = ["std"] }
 futures-lite = "2"
 rand = "0.8"

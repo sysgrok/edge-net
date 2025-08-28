@@ -1,6 +1,6 @@
 [package]
 name = "edge-http"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 rust-version = "1.83"
 description = "Async + `no_std` + no-alloc implementation of the HTTP protocol"

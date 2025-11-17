@@ -77,7 +77,7 @@ impl HostAnswers for Host<'_> {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Service<'a> {
-    /// The name of the service.
+    /// The name of the service. I.e. "printer"
     pub name: &'a str,
     /// The priority of the service.
     pub priority: u16,

@@ -2,13 +2,16 @@ use core::net::IpAddr;
 
 use edge_nal::AddrType;
 
-use embassy_net::{
-    dns::{DnsQueryType, Error},
-    Stack,
-};
+use embassy_net::dns::{DnsQueryType, Error};
+use embassy_net::Stack;
+
 use embedded_io_async::ErrorKind;
 
-/// A struct that implements the `Dns` trait from `edge-nal`
+/// A type that implements the `Dns` trait from `edge-nal`.
+/// It uses the DNS resolver from the provided Embassy networking stack.
+///
+/// The type is `Copy` and `Clone`, so it can be easily passed around.
+#[derive(Copy, Clone)]
 pub struct Dns<'a> {
     stack: Stack<'a>,
 }
@@ -51,6 +54,7 @@ impl edge_nal::Dns for Dns<'_> {
     }
 }
 
+/// DNS error type
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct DnsError(Error);
@@ -61,7 +65,6 @@ impl From<Error> for DnsError {
     }
 }
 
-// TODO
 impl embedded_io_async::Error for DnsError {
     fn kind(&self) -> ErrorKind {
         ErrorKind::Other

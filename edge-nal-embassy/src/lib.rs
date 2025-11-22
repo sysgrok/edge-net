@@ -41,6 +41,8 @@ pub trait DynPool<B>: SealedDynPool<B> {}
 impl<T, B> DynPool<B> for &T where T: DynPool<B> {}
 
 mod sealed {
+    use core::ptr::NonNull;
+
     /// The sealed trait variant of `DynPool`.
     pub trait SealedDynPool<B> {
         /// Allocate an object from the pool.
@@ -49,7 +51,10 @@ mod sealed {
         fn alloc(&self) -> Option<B>;
 
         /// Free an object back to the pool.
-        fn free(&self, buffer: B);
+        ///
+        /// # Safety
+        /// - `buffer_token` must be a pointer obtained from `alloc` that hasn't been freed yet.
+        unsafe fn free(&self, buffer_token: NonNull<u8>);
     }
 
     impl<T, B> SealedDynPool<B> for &T
@@ -60,8 +65,8 @@ mod sealed {
             (**self).alloc()
         }
 
-        fn free(&self, buffer: B) {
-            (**self).free(buffer)
+        unsafe fn free(&self, buffer_token: NonNull<u8>) {
+            (**self).free(buffer_token)
         }
     }
 }

@@ -111,9 +111,12 @@ impl edge_nal::TcpAccept for TcpAccept<'_> {
 /// A type that represents a TCP socket
 /// Implements the `Read` and `Write` traits from `embedded-io-async`, as well as the `TcpSplit` factory trait from `edge-nal`
 pub struct TcpSocket<'d> {
+    /// The underlying Embassy TCP socket.
     socket: embassy_net::tcp::TcpSocket<'d>,
+    /// The pool of TCP socket buffers used by this socket.
     stack_buffers: &'d dyn DynPool<TcpSocketBuffers>,
-    socket_buffers: Option<TcpSocketBuffers>,
+    /// The token used to identify the socket buffers in the pool.
+    buffer_token: NonNull<u8>,
 }
 
 impl<'d> TcpSocket<'d> {
@@ -140,7 +143,7 @@ impl<'d> TcpSocket<'d> {
                 },
             ),
             stack_buffers,
-            socket_buffers: Some(socket_buffers),
+            buffer_token: socket_buffers.token,
         })
     }
 
@@ -188,7 +191,9 @@ impl<'d> TcpSocket<'d> {
 impl Drop for TcpSocket<'_> {
     fn drop(&mut self) {
         self.socket.close();
-        self.stack_buffers.free(unwrap!(self.socket_buffers.take()));
+        unsafe {
+            self.stack_buffers.free(self.buffer_token);
+        }
     }
 }
 
@@ -372,9 +377,9 @@ impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> SealedDynPool<TcpSo
         })
     }
 
-    fn free(&self, buf: TcpSocketBuffers) {
+    unsafe fn free(&self, buffer_token: NonNull<u8>) {
         unsafe {
-            Pool::free(self, buf.token.cast::<([u8; TX_SZ], [u8; RX_SZ])>());
+            Pool::free(self, buffer_token.cast::<([u8; TX_SZ], [u8; RX_SZ])>());
         }
     }
 }

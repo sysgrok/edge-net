@@ -66,8 +66,8 @@ pub struct UdpSocket<'d> {
     socket: embassy_net::udp::UdpSocket<'d>,
     /// The pool of UDP socket buffers.
     stack_buffers: &'d dyn DynPool<UdpSocketBuffers>,
-    /// The allocated UDP socket buffers.
-    socket_buffers: Option<UdpSocketBuffers>,
+    /// The token used to identify the socket buffers in the pool.
+    buffer_token: NonNull<u8>,
 }
 
 impl<'d> UdpSocket<'d> {
@@ -107,7 +107,7 @@ impl<'d> UdpSocket<'d> {
                 },
             ),
             stack_buffers,
-            socket_buffers: Some(socket_buffers),
+            buffer_token: socket_buffers.token,
         })
     }
 }
@@ -115,7 +115,9 @@ impl<'d> UdpSocket<'d> {
 impl Drop for UdpSocket<'_> {
     fn drop(&mut self) {
         self.socket.close();
-        self.stack_buffers.free(unwrap!(self.socket_buffers.take()));
+        unsafe {
+            self.stack_buffers.free(self.buffer_token);
+        }
     }
 }
 
@@ -413,11 +415,11 @@ impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize>
         })
     }
 
-    fn free(&self, buf: UdpSocketBuffers) {
+    unsafe fn free(&self, buffer_token: NonNull<u8>) {
         unsafe {
             Pool::free(
                 self,
-                buf.token.cast::<(
+                buffer_token.cast::<(
                     [u8; TX_SZ],
                     [u8; RX_SZ],
                     [PacketMetadata; M],

@@ -33,7 +33,7 @@ mod udp;
 /// A const-generics-erased trait variant of `Pool`
 ///
 /// Allows for types like `Tcp`, `TcpSocket`, `Udp` and `UdpSocket` that do reference the
-/// pool to erase the const-genenerics set on the Pool object type when used for TCP and UDP buffers.
+/// pool to erase the const-generics set on the Pool object type when used for TCP and UDP buffers.
 ///
 /// To erase the type of the pool itself, these types use `&dyn DynPool<B>`
 pub trait DynPool<B>: SealedDynPool<B> {}

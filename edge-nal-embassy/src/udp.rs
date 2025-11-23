@@ -8,41 +8,40 @@ use embassy_net::Stack;
 
 use embedded_io_async::{ErrorKind, ErrorType};
 
-use crate::{to_emb_bind_socket, to_emb_socket, to_net_socket, Pool};
+use crate::sealed::SealedDynPool;
+use crate::{to_emb_bind_socket, to_emb_socket, to_net_socket, DynPool, Pool};
 
-/// A struct that implements the `UdpBind` factory trait from `edge-nal`
-/// Capable of managing up to N concurrent connections with TX and RX buffers according to TX_SZ and RX_SZ, and packet metadata according to `M`.
-pub struct Udp<
-    'd,
-    const N: usize,
-    const TX_SZ: usize = 1500,
-    const RX_SZ: usize = 1500,
-    const M: usize = 2,
-> {
+/// A type that implements the `UdpBind` factory trait from `edge-nal`.
+/// Uses the provided Embassy networking stack and UDP buffers pool to create UDP sockets.
+///
+/// The type is `Copy` and `Clone`, so it can be easily passed around.
+#[derive(Copy, Clone)]
+pub struct Udp<'d> {
+    /// The Embassy networking stack to use for creating UDP sockets.
     stack: Stack<'d>,
-    buffers: &'d UdpBuffers<N, TX_SZ, RX_SZ, M>,
+    /// The pool of UDP socket buffers to use for creating UDP sockets.
+    buffers: &'d dyn DynPool<UdpSocketBuffers>,
 }
 
-impl<'d, const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize>
-    Udp<'d, N, TX_SZ, RX_SZ, M>
-{
+impl<'d> Udp<'d> {
     /// Create a new `Udp` instance for the provided Embassy networking stack using the provided UDP buffers.
     ///
-    /// Ensure that the number of buffers `N` fits within StackResources<N> of
-    /// [embassy_net::Stack], while taking into account the sockets used for DHCP, DNS, etc. else
-    /// [smoltcp::iface::SocketSet] will panic with `adding a socket to a full SocketSet`.
-    pub fn new(stack: Stack<'d>, buffers: &'d UdpBuffers<N, TX_SZ, RX_SZ, M>) -> Self {
+    /// # Arguments
+    /// - `stack`: The Embassy networking stack to use for creating UDP sockets.
+    /// - `buffers`: A pool of UDP socket buffers to use for creating UDP sockets.
+    ///   NOTE: Ensure that the number of buffers in the pool is not greater than the number of sockets
+    ///   supported by the provided [embassy_net::Stack], or else [smoltcp::iface::SocketSet] will panic with
+    ///   `adding a socket to a full SocketSet`.
+    pub fn new(stack: Stack<'d>, buffers: &'d dyn DynPool<UdpSocketBuffers>) -> Self {
         Self { stack, buffers }
     }
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> UdpBind
-    for Udp<'_, N, TX_SZ, RX_SZ, M>
-{
+impl UdpBind for Udp<'_> {
     type Error = UdpError;
 
     type Socket<'a>
-        = UdpSocket<'a, N, TX_SZ, RX_SZ, M>
+        = UdpSocket<'a>
     where
         Self: 'a;
 
@@ -57,66 +56,76 @@ impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> Udp
     }
 }
 
-/// A UDP socket
-/// Implements the `UdpReceive` `UdpSend` and `UdpSplit` traits from `edge-nal`
-pub struct UdpSocket<'d, const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> {
+/// A UDP socket.
+/// Implements the `UdpReceive` `UdpSend` and `UdpSplit` traits from `edge-nal`.
+pub struct UdpSocket<'d> {
+    /// The Embassy networking stack.
     #[allow(unused)]
     stack: embassy_net::Stack<'d>,
+    /// The underlying Embassy UDP socket.
     socket: embassy_net::udp::UdpSocket<'d>,
-    stack_buffers: &'d UdpBuffers<N, TX_SZ, RX_SZ, M>,
-    socket_buffers: NonNull<([u8; TX_SZ], [u8; RX_SZ])>,
-    socket_meta_buffers: NonNull<([PacketMetadata; M], [PacketMetadata; M])>,
+    /// The pool of UDP socket buffers.
+    stack_buffers: &'d dyn DynPool<UdpSocketBuffers>,
+    /// The token used to identify the socket buffers in the pool.
+    buffer_token: NonNull<u8>,
 }
 
-impl<'d, const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize>
-    UdpSocket<'d, N, TX_SZ, RX_SZ, M>
-{
+impl<'d> UdpSocket<'d> {
     fn new(
         stack: Stack<'d>,
-        stack_buffers: &'d UdpBuffers<N, TX_SZ, RX_SZ, M>,
+        stack_buffers: &'d dyn DynPool<UdpSocketBuffers>,
     ) -> Result<Self, UdpError> {
-        let mut socket_buffers = stack_buffers.pool.alloc().ok_or(UdpError::NoBuffers)?;
-        let mut socket_meta_buffers = unwrap!(stack_buffers.meta_pool.alloc());
+        let mut socket_buffers = stack_buffers.alloc().ok_or(UdpError::NoBuffers)?;
 
         Ok(Self {
             stack,
-            socket: unsafe {
-                embassy_net::udp::UdpSocket::new(
-                    stack,
-                    &mut socket_meta_buffers.as_mut().1,
-                    &mut socket_buffers.as_mut().1,
-                    &mut socket_meta_buffers.as_mut().0,
-                    &mut socket_buffers.as_mut().0,
-                )
-            },
+            socket: embassy_net::udp::UdpSocket::new(
+                stack,
+                unsafe {
+                    core::slice::from_raw_parts_mut(
+                        socket_buffers.md_rx_buf.as_mut(),
+                        socket_buffers.md_buf_len,
+                    )
+                },
+                unsafe {
+                    core::slice::from_raw_parts_mut(
+                        socket_buffers.rx_buf.as_mut(),
+                        socket_buffers.rx_buf_len,
+                    )
+                },
+                unsafe {
+                    core::slice::from_raw_parts_mut(
+                        socket_buffers.md_tx_buf.as_mut(),
+                        socket_buffers.md_buf_len,
+                    )
+                },
+                unsafe {
+                    core::slice::from_raw_parts_mut(
+                        socket_buffers.tx_buf.as_mut(),
+                        socket_buffers.tx_buf_len,
+                    )
+                },
+            ),
             stack_buffers,
-            socket_buffers,
-            socket_meta_buffers,
+            buffer_token: socket_buffers.token,
         })
     }
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> Drop
-    for UdpSocket<'_, N, TX_SZ, RX_SZ, M>
-{
+impl Drop for UdpSocket<'_> {
     fn drop(&mut self) {
+        self.socket.close();
         unsafe {
-            self.socket.close();
-            self.stack_buffers.pool.free(self.socket_buffers);
-            self.stack_buffers.meta_pool.free(self.socket_meta_buffers);
+            self.stack_buffers.free(self.buffer_token);
         }
     }
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> ErrorType
-    for UdpSocket<'_, N, TX_SZ, RX_SZ, M>
-{
+impl ErrorType for UdpSocket<'_> {
     type Error = UdpError;
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> UdpReceive
-    for UdpSocket<'_, N, TX_SZ, RX_SZ, M>
-{
+impl UdpReceive for UdpSocket<'_> {
     async fn receive(&mut self, buffer: &mut [u8]) -> Result<(usize, SocketAddr), Self::Error> {
         let (len, remote_endpoint) = self.socket.recv_from(buffer).await?;
 
@@ -124,9 +133,7 @@ impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> Udp
     }
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> UdpSend
-    for UdpSocket<'_, N, TX_SZ, RX_SZ, M>
-{
+impl UdpSend for UdpSocket<'_> {
     async fn send(&mut self, remote: SocketAddr, data: &[u8]) -> Result<(), Self::Error> {
         self.socket
             .send_to(
@@ -139,15 +146,11 @@ impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> Udp
     }
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> ErrorType
-    for &UdpSocket<'_, N, TX_SZ, RX_SZ, M>
-{
+impl ErrorType for &UdpSocket<'_> {
     type Error = UdpError;
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> UdpReceive
-    for &UdpSocket<'_, N, TX_SZ, RX_SZ, M>
-{
+impl UdpReceive for &UdpSocket<'_> {
     async fn receive(&mut self, buffer: &mut [u8]) -> Result<(usize, SocketAddr), Self::Error> {
         let (len, remote_endpoint) = self.socket.recv_from(buffer).await?;
 
@@ -155,9 +158,7 @@ impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> Udp
     }
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> UdpSend
-    for &UdpSocket<'_, N, TX_SZ, RX_SZ, M>
-{
+impl UdpSend for &UdpSocket<'_> {
     async fn send(&mut self, remote: SocketAddr, data: &[u8]) -> Result<(), Self::Error> {
         self.socket
             .send_to(
@@ -170,18 +171,14 @@ impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> Udp
     }
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> Readable
-    for &UdpSocket<'_, N, TX_SZ, RX_SZ, M>
-{
+impl Readable for &UdpSocket<'_> {
     async fn readable(&mut self) -> Result<(), Self::Error> {
         self.socket.wait_recv_ready().await;
         Ok(())
     }
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> UdpSplit
-    for UdpSocket<'_, N, TX_SZ, RX_SZ, M>
-{
+impl UdpSplit for UdpSocket<'_> {
     type Receive<'a>
         = &'a Self
     where
@@ -197,9 +194,7 @@ impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> Udp
     }
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> MulticastV4
-    for UdpSocket<'_, N, TX_SZ, RX_SZ, M>
-{
+impl MulticastV4 for UdpSocket<'_> {
     async fn join_v4(
         &mut self,
         #[allow(unused)] multicast_addr: Ipv4Addr,
@@ -243,9 +238,7 @@ impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> Mul
     }
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> MulticastV6
-    for UdpSocket<'_, N, TX_SZ, RX_SZ, M>
-{
+impl MulticastV6 for UdpSocket<'_> {
     async fn join_v6(
         &mut self,
         #[allow(unused)] multicast_addr: Ipv6Addr,
@@ -289,9 +282,7 @@ impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> Mul
     }
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> Readable
-    for UdpSocket<'_, N, TX_SZ, RX_SZ, M>
-{
+impl Readable for UdpSocket<'_> {
     async fn readable(&mut self) -> Result<(), Self::Error> {
         self.socket.wait_recv_ready().await;
         Ok(())
@@ -302,14 +293,19 @@ impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> Rea
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum UdpError {
+    /// An error occurred while receiving data.
     Recv(RecvError),
+    /// An error occurred while sending data.
     Send(SendError),
+    /// An error occurred while binding the socket.
     Bind(BindError),
     /// The table of joined multicast groups is already full.
     MulticastGroupTableFull,
     /// Cannot join/leave the given multicast group.
     MulticastUnaddressable,
+    /// No more UDP socket buffers are available.
     NoBuffers,
+    /// The provided protocol is not supported.
     UnsupportedProto,
 }
 
@@ -344,7 +340,6 @@ impl From<embassy_net::MulticastError> for UdpError {
     }
 }
 
-// TODO
 impl embedded_io_async::Error for UdpError {
     fn kind(&self) -> ErrorKind {
         match self {
@@ -359,34 +354,83 @@ impl embedded_io_async::Error for UdpError {
     }
 }
 
-/// A struct that holds a pool of UDP buffers
-pub struct UdpBuffers<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> {
-    pool: Pool<([u8; TX_SZ], [u8; RX_SZ]), N>,
-    meta_pool: Pool<
-        (
-            [embassy_net::udp::PacketMetadata; M],
-            [embassy_net::udp::PacketMetadata; M],
-        ),
-        N,
-    >,
+/// A type that holds the UDP socket buffers.
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct UdpSocketBuffers {
+    /// A token used to identify the buffer in the pool.
+    token: NonNull<u8>,
+    /// The metadata buffer for receiving packets.
+    md_rx_buf: NonNull<PacketMetadata>,
+    /// The buffer for receiving packets.
+    rx_buf: NonNull<u8>,
+    /// The metadata buffer for transmitting packets.
+    md_tx_buf: NonNull<PacketMetadata>,
+    /// The buffer for transmitting packets.
+    tx_buf: NonNull<u8>,
+    /// The length of a metadata buffer.
+    md_buf_len: usize,
+    /// The length of the receive buffer.
+    rx_buf_len: usize,
+    /// The length of the transmit buffer.
+    tx_buf_len: usize,
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize> Default
-    for UdpBuffers<N, TX_SZ, RX_SZ, M>
+/// A type alias for a pool of UDP socket buffers.
+pub type UdpBuffers<
+    const N: usize,
+    const TX_SZ: usize = 1472,
+    const RX_SZ: usize = 1472,
+    const M: usize = 2,
+> = Pool<
+    (
+        [u8; TX_SZ],
+        [u8; RX_SZ],
+        [PacketMetadata; M],
+        [PacketMetadata; M],
+    ),
+    N,
+>;
+
+impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize>
+    SealedDynPool<UdpSocketBuffers> for UdpBuffers<N, TX_SZ, RX_SZ, M>
 {
-    fn default() -> Self {
-        Self::new()
+    fn alloc(&self) -> Option<UdpSocketBuffers> {
+        let mut socket_buffers = Pool::alloc(self)?;
+
+        let rx_buf = unsafe { &mut socket_buffers.as_mut().1 };
+        let tx_buf = unsafe { &mut socket_buffers.as_mut().0 };
+        let md_rx_buf = unsafe { &mut socket_buffers.as_mut().3 };
+        let md_tx_buf = unsafe { &mut socket_buffers.as_mut().2 };
+
+        Some(UdpSocketBuffers {
+            token: socket_buffers.cast::<u8>(),
+            md_rx_buf: unwrap!(NonNull::new(md_rx_buf.as_mut_ptr())),
+            rx_buf: unwrap!(NonNull::new(rx_buf.as_mut_ptr())),
+            md_tx_buf: unwrap!(NonNull::new(md_tx_buf.as_mut_ptr())),
+            tx_buf: unwrap!(NonNull::new(tx_buf.as_mut_ptr())),
+            md_buf_len: md_rx_buf.len(),
+            rx_buf_len: rx_buf.len(),
+            tx_buf_len: tx_buf.len(),
+        })
+    }
+
+    unsafe fn free(&self, buffer_token: NonNull<u8>) {
+        unsafe {
+            Pool::free(
+                self,
+                buffer_token.cast::<(
+                    [u8; TX_SZ],
+                    [u8; RX_SZ],
+                    [PacketMetadata; M],
+                    [PacketMetadata; M],
+                )>(),
+            );
+        }
     }
 }
 
 impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize>
-    UdpBuffers<N, TX_SZ, RX_SZ, M>
+    DynPool<UdpSocketBuffers> for UdpBuffers<N, TX_SZ, RX_SZ, M>
 {
-    /// Create a new `UdpBuffers` instance
-    pub const fn new() -> Self {
-        Self {
-            pool: Pool::new(),
-            meta_pool: Pool::new(),
-        }
-    }
 }

@@ -27,10 +27,17 @@ use edge_nal::{
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub use raw::*;
 
-#[derive(Default, Clone)]
+/// The STD network stack implementation.
+///
+/// This uses the standard library's networking types under the hood,
+/// wrapped in async-io's `Async` type for async support.
+///
+/// The type is `Copy` and `Clone`, so it can be easily passed around.
+#[derive(Default, Copy, Clone)]
 pub struct Stack(());
 
 impl Stack {
+    /// Create a new STD network stack instance.
     pub const fn new() -> Self {
         Self(())
     }
@@ -66,6 +73,7 @@ impl TcpBind for Stack {
     }
 }
 
+/// The TCP acceptor type for the STD network stack.
 pub struct TcpAcceptor(Async<net::TcpListener>);
 
 impl TcpAccept for TcpAcceptor {
@@ -116,13 +124,19 @@ impl TcpAccept for TcpAcceptor {
     }
 }
 
+/// The TCP socket type for the STD network stack.
 pub struct TcpSocket(Async<TcpStream>);
 
 impl TcpSocket {
+    /// Create a new TCP socket from the given async TCP stream.
+    ///
+    /// # Arguments
+    /// - `socket`: The async TCP stream to wrap.
     pub const fn new(socket: Async<TcpStream>) -> Self {
         Self(socket)
     }
 
+    /// Release the underlying async TCP stream.
     pub fn release(self) -> Async<TcpStream> {
         self.0
     }
@@ -262,17 +276,28 @@ impl UdpBind for Stack {
     }
 }
 
+/// The UDP socket type for the STD network stack.
 pub struct UdpSocket(Async<StdUdpSocket>);
 
 impl UdpSocket {
+    /// Create a new UDP socket from the given async UDP socket.
+    ///
+    /// # Arguments
+    /// - `socket`: The async UDP socket to wrap.
     pub const fn new(socket: Async<StdUdpSocket>) -> Self {
         Self(socket)
     }
 
+    /// Release the underlying async UDP socket.
     pub fn release(self) -> Async<StdUdpSocket> {
         self.0
     }
 
+    /// Join a multicast group for IPv4.
+    ///
+    /// # Arguments
+    /// - `multiaddr`: The multicast address to join.
+    /// - `interface`: The interface address to use.
     pub fn join_multicast_v4(
         &self,
         multiaddr: &Ipv4Addr,
@@ -289,6 +314,11 @@ impl UdpSocket {
         Ok(())
     }
 
+    /// Leave a multicast group for IPv4.
+    ///
+    /// # Arguments
+    /// - `multiaddr`: The multicast address to leave.
+    /// - `interface`: The interface address to use.
     pub fn leave_multicast_v4(
         &self,
         multiaddr: &Ipv4Addr,
@@ -568,6 +598,7 @@ impl Dns for Stack {
     }
 }
 
+/// Perform a DNS lookup for the given host and address type.
 fn dns_lookup_host(host: &str, addr_type: AddrType) -> Result<IpAddr, io::Error> {
     (host, 0_u16)
         .to_socket_addrs()?
@@ -604,10 +635,12 @@ mod raw {
     use crate::sys;
     use crate::syscall_los;
 
-    #[derive(Default)]
+    /// The RAW interface binding type for Linux.
+    #[derive(Default, Copy, Clone)]
     pub struct Interface(u32);
 
     impl Interface {
+        /// Create a new RAW interface binding for the given interface index.
         pub const fn new(interface: u32) -> Self {
             Self(interface)
         }
@@ -665,13 +698,20 @@ mod raw {
         }
     }
 
+    /// The RAW socket type for Linux.
     pub struct RawSocket(Async<std::net::UdpSocket>, u32);
 
     impl RawSocket {
+        /// Create a new RAW socket from the given async UDP socket and interface index.
+        ///
+        /// # Arguments
+        /// - `socket`: The async UDP socket to wrap.
+        /// - `interface`: The interface index.
         pub const fn new(socket: Async<std::net::UdpSocket>, interface: u32) -> Self {
             Self(socket, interface)
         }
 
+        /// Release the underlying async UDP socket and interface index.
         pub fn release(self) -> (Async<std::net::UdpSocket>, u32) {
             (self.0, self.1)
         }

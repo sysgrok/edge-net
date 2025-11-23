@@ -11,33 +11,40 @@ use embassy_net::Stack;
 
 use embedded_io_async::{ErrorKind, ErrorType, Read, Write};
 
-use crate::{to_emb_bind_socket, to_emb_socket, to_net_socket, Pool};
+use crate::sealed::SealedDynPool;
+use crate::{to_emb_bind_socket, to_emb_socket, to_net_socket, DynPool, Pool};
 
-/// A struct that implements the `TcpConnect` and `TcpBind` factory traits from `edge-nal`
-/// Capable of managing up to N concurrent connections with TX and RX buffers according to TX_SZ and RX_SZ.
-pub struct Tcp<'d, const N: usize, const TX_SZ: usize = 1024, const RX_SZ: usize = 1024> {
+/// A type that implements the `TcpConnect` and `TcpBind` factory traits from `edge-nal`
+/// Uses the provided Embassy networking stack and TCP buffers pool to create TCP sockets.
+///
+/// The type is `Copy` and `Clone`, so it can be easily passed around.
+#[derive(Copy, Clone)]
+pub struct Tcp<'d> {
+    /// The Embassy networking stack to use for creating TCP sockets.
     stack: Stack<'d>,
-    buffers: &'d TcpBuffers<N, TX_SZ, RX_SZ>,
+    /// The pool of TCP socket buffers to use for creating TCP sockets.
+    buffers: &'d dyn DynPool<TcpSocketBuffers>,
 }
 
-impl<'d, const N: usize, const TX_SZ: usize, const RX_SZ: usize> Tcp<'d, N, TX_SZ, RX_SZ> {
-    /// Create a new `Tcp` instance for the provided Embassy networking stack, using the provided TCP buffers
+impl<'d> Tcp<'d> {
+    /// Create a new `Tcp` instance for the provided Embassy networking stack, using the provided TCP buffers.
     ///
-    /// Ensure that the number of buffers `N` fits within StackResources<N> of
-    /// [embassy_net::Stack], while taking into account the sockets used for DHCP, DNS, etc. else
-    /// [smoltcp::iface::SocketSet] will panic with `adding a socket to a full SocketSet`.
-    pub fn new(stack: Stack<'d>, buffers: &'d TcpBuffers<N, TX_SZ, RX_SZ>) -> Self {
+    /// # Arguments
+    /// - `stack`: The Embassy networking stack to use for creating TCP sockets.
+    /// - `buffers`: A reference to a pool of TCP socket buffers.
+    ///   NOTE: Ensure that the number of buffers in the pool is not greater than the number of sockets
+    ///   supported by the provided [embassy_net::Stack], or else [smoltcp::iface::SocketSet] will panic with
+    ///   `adding a socket to a full SocketSet`.
+    pub fn new(stack: Stack<'d>, buffers: &'d dyn DynPool<TcpSocketBuffers>) -> Self {
         Self { stack, buffers }
     }
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> TcpConnect
-    for Tcp<'_, N, TX_SZ, RX_SZ>
-{
+impl TcpConnect for Tcp<'_> {
     type Error = TcpError;
 
     type Socket<'a>
-        = TcpSocket<'a, N, TX_SZ, RX_SZ>
+        = TcpSocket<'a>
     where
         Self: 'a;
 
@@ -53,32 +60,37 @@ impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> TcpConnect
     }
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> TcpBind for Tcp<'_, N, TX_SZ, RX_SZ> {
+impl TcpBind for Tcp<'_> {
     type Error = TcpError;
 
     type Accept<'a>
-        = TcpAccept<'a, N, TX_SZ, RX_SZ>
+        = TcpAccept<'a>
     where
         Self: 'a;
 
     async fn bind(&self, local: SocketAddr) -> Result<Self::Accept<'_>, Self::Error> {
-        Ok(TcpAccept { stack: self, local })
+        Ok(TcpAccept {
+            stack: *self,
+            local,
+        })
     }
 }
 
-/// Represents an acceptor for incoming TCP client connections. Implements the `TcpAccept` factory trait from `edge-nal`
-pub struct TcpAccept<'d, const N: usize, const TX_SZ: usize = 1024, const RX_SZ: usize = 1024> {
-    stack: &'d Tcp<'d, N, TX_SZ, RX_SZ>,
+/// A type that represents an acceptor for incoming TCP client connections.
+/// Implements the `TcpAccept` factory trait from `edge-nal`
+///
+/// The type is `Copy` and `Clone`, so it can be easily passed around.
+#[derive(Copy, Clone)]
+pub struct TcpAccept<'d> {
+    stack: Tcp<'d>,
     local: SocketAddr,
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> edge_nal::TcpAccept
-    for TcpAccept<'_, N, TX_SZ, RX_SZ>
-{
+impl edge_nal::TcpAccept for TcpAccept<'_> {
     type Error = TcpError;
 
     type Socket<'a>
-        = TcpSocket<'a, N, TX_SZ, RX_SZ>
+        = TcpSocket<'a>
     where
         Self: 'a;
 
@@ -96,31 +108,42 @@ impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> edge_nal::TcpAccept
     }
 }
 
-/// A TCP socket
+/// A type that represents a TCP socket
 /// Implements the `Read` and `Write` traits from `embedded-io-async`, as well as the `TcpSplit` factory trait from `edge-nal`
-pub struct TcpSocket<'d, const N: usize, const TX_SZ: usize, const RX_SZ: usize> {
+pub struct TcpSocket<'d> {
+    /// The underlying Embassy TCP socket.
     socket: embassy_net::tcp::TcpSocket<'d>,
-    stack_buffers: &'d TcpBuffers<N, TX_SZ, RX_SZ>,
-    socket_buffers: NonNull<([u8; TX_SZ], [u8; RX_SZ])>,
+    /// The pool of TCP socket buffers used by this socket.
+    stack_buffers: &'d dyn DynPool<TcpSocketBuffers>,
+    /// The token used to identify the socket buffers in the pool.
+    buffer_token: NonNull<u8>,
 }
 
-impl<'d, const N: usize, const TX_SZ: usize, const RX_SZ: usize> TcpSocket<'d, N, TX_SZ, RX_SZ> {
+impl<'d> TcpSocket<'d> {
     fn new(
         stack: Stack<'d>,
-        stack_buffers: &'d TcpBuffers<N, TX_SZ, RX_SZ>,
+        stack_buffers: &'d dyn DynPool<TcpSocketBuffers>,
     ) -> Result<Self, TcpError> {
-        let mut socket_buffers = stack_buffers.pool.alloc().ok_or(TcpError::NoBuffers)?;
+        let mut socket_buffers = stack_buffers.alloc().ok_or(TcpError::NoBuffers)?;
 
         Ok(Self {
-            socket: unsafe {
-                embassy_net::tcp::TcpSocket::new(
-                    stack,
-                    &mut socket_buffers.as_mut().1,
-                    &mut socket_buffers.as_mut().0,
-                )
-            },
+            socket: embassy_net::tcp::TcpSocket::new(
+                stack,
+                unsafe {
+                    core::slice::from_raw_parts_mut(
+                        socket_buffers.rx_buf.as_mut(),
+                        socket_buffers.rx_buf_len,
+                    )
+                },
+                unsafe {
+                    core::slice::from_raw_parts_mut(
+                        socket_buffers.tx_buf.as_mut(),
+                        socket_buffers.tx_buf_len,
+                    )
+                },
+            ),
             stack_buffers,
-            socket_buffers,
+            buffer_token: socket_buffers.token,
         })
     }
 
@@ -165,34 +188,26 @@ impl<'d, const N: usize, const TX_SZ: usize, const RX_SZ: usize> TcpSocket<'d, N
     }
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> Drop
-    for TcpSocket<'_, N, TX_SZ, RX_SZ>
-{
+impl Drop for TcpSocket<'_> {
     fn drop(&mut self) {
+        self.socket.close();
         unsafe {
-            self.socket.close();
-            self.stack_buffers.pool.free(self.socket_buffers);
+            self.stack_buffers.free(self.buffer_token);
         }
     }
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> ErrorType
-    for TcpSocket<'_, N, TX_SZ, RX_SZ>
-{
+impl ErrorType for TcpSocket<'_> {
     type Error = TcpError;
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> Read
-    for TcpSocket<'_, N, TX_SZ, RX_SZ>
-{
+impl Read for TcpSocket<'_> {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         Ok(self.socket.read(buf).await?)
     }
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> Write
-    for TcpSocket<'_, N, TX_SZ, RX_SZ>
-{
+impl Write for TcpSocket<'_> {
     async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         Ok(self.socket.write(buf).await?)
     }
@@ -204,18 +219,14 @@ impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> Write
     }
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> Readable
-    for TcpSocket<'_, N, TX_SZ, RX_SZ>
-{
+impl Readable for TcpSocket<'_> {
     async fn readable(&mut self) -> Result<(), Self::Error> {
         self.socket.wait_read_ready().await;
         Ok(())
     }
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> TcpShutdown
-    for TcpSocket<'_, N, TX_SZ, RX_SZ>
-{
+impl TcpShutdown for TcpSocket<'_> {
     async fn close(&mut self, what: Close) -> Result<(), Self::Error> {
         TcpSocket::close(self, what).await
     }
@@ -225,8 +236,8 @@ impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> TcpShutdown
     }
 }
 
-/// Represents the read half of a split TCP socket
-/// Implements the `Read` trait from `embedded-io-async`
+/// A type that represents the read half of a split TCP socket.
+/// Implements the `Read` trait from `embedded-io-async`.
 pub struct TcpSocketRead<'a>(TcpReader<'a>);
 
 impl ErrorType for TcpSocketRead<'_> {
@@ -246,8 +257,8 @@ impl Readable for TcpSocketRead<'_> {
     }
 }
 
-/// Represents the write half of a split TCP socket
-/// Implements the `Write` trait from `embedded-io-async`
+/// A type that represents the write half of a split TCP socket.
+/// Implements the `Write` trait from `embedded-io-async`.
 pub struct TcpSocketWrite<'a>(TcpWriter<'a>);
 
 impl ErrorType for TcpSocketWrite<'_> {
@@ -264,9 +275,7 @@ impl Write for TcpSocketWrite<'_> {
     }
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> TcpSplit
-    for TcpSocket<'_, N, TX_SZ, RX_SZ>
-{
+impl TcpSplit for TcpSocket<'_> {
     type Read<'a>
         = TcpSocketRead<'a>
     where
@@ -284,14 +293,19 @@ impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> TcpSplit
     }
 }
 
-/// A shared error type that is used by the TCP factory traits implementation as well as the TCP socket
+/// A shared error type that is used by the TCP factory traits implementation as well as the TCP socket.
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum TcpError {
+    /// A general TCP error.
     General(Error),
+    /// An error that occurred while connecting.
     Connect(ConnectError),
+    /// An error that occurred while accepting a connection.
     Accept(AcceptError),
+    /// No TCP socket buffers available.
     NoBuffers,
+    /// The provided socket address uses an unsupported protocol.
     UnsupportedProto,
 }
 
@@ -313,7 +327,6 @@ impl From<AcceptError> for TcpError {
     }
 }
 
-// TODO
 impl embedded_io_async::Error for TcpError {
     fn kind(&self) -> ErrorKind {
         match self {
@@ -326,22 +339,52 @@ impl embedded_io_async::Error for TcpError {
     }
 }
 
-/// A struct that holds a pool of TCP buffers
-pub struct TcpBuffers<const N: usize, const TX_SZ: usize, const RX_SZ: usize> {
-    pool: Pool<([u8; TX_SZ], [u8; RX_SZ]), N>,
+/// A type that holds the TCP socket buffers.
+#[derive(Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct TcpSocketBuffers {
+    /// A token used to identify the buffer in the pool.
+    token: NonNull<u8>,
+    /// The buffer for receiving data.
+    rx_buf: NonNull<u8>,
+    /// The buffer for transmitting data.
+    tx_buf: NonNull<u8>,
+    /// The length of the receive buffer.
+    rx_buf_len: usize,
+    /// The length of the transmit buffer.
+    tx_buf_len: usize,
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> Default
+/// A type alias for a pool of TCP socket buffers.
+pub type TcpBuffers<const N: usize, const TX_SZ: usize = 1024, const RX_SZ: usize = 1024> =
+    Pool<([u8; TX_SZ], [u8; RX_SZ]), N>;
+
+impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> SealedDynPool<TcpSocketBuffers>
     for TcpBuffers<N, TX_SZ, RX_SZ>
 {
-    fn default() -> Self {
-        Self::new()
+    fn alloc(&self) -> Option<TcpSocketBuffers> {
+        let mut socket_buffers = Pool::alloc(self)?;
+
+        let rx_buf = unsafe { &mut socket_buffers.as_mut().1 };
+        let tx_buf = unsafe { &mut socket_buffers.as_mut().0 };
+
+        Some(TcpSocketBuffers {
+            token: socket_buffers.cast::<u8>(),
+            rx_buf: unwrap!(NonNull::new(rx_buf.as_mut_ptr())),
+            tx_buf: unwrap!(NonNull::new(tx_buf.as_mut_ptr())),
+            rx_buf_len: rx_buf.len(),
+            tx_buf_len: tx_buf.len(),
+        })
+    }
+
+    unsafe fn free(&self, buffer_token: NonNull<u8>) {
+        unsafe {
+            Pool::free(self, buffer_token.cast::<([u8; TX_SZ], [u8; RX_SZ])>());
+        }
     }
 }
 
-impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> TcpBuffers<N, TX_SZ, RX_SZ> {
-    /// Create a new `TcpBuffers` instance
-    pub const fn new() -> Self {
-        Self { pool: Pool::new() }
-    }
+impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> DynPool<TcpSocketBuffers>
+    for TcpBuffers<N, TX_SZ, RX_SZ>
+{
 }

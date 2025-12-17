@@ -9,7 +9,7 @@ description = "no_std and no-alloc async implementations of various network prot
 repository = "https://github.com/ivmarkov/edge-net"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-rust-version = "1.83"
+rust-version = "1.87"
 
 [features]
 default = ["io"]

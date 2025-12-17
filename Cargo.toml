@@ -38,11 +38,11 @@ edge-nal-embassy = { workspace = true, optional = true }
 log = "0.4"
 anyhow = "1"
 env_logger = "0.10"
-embedded-io-async = "0.6"
-embassy-time = { version = "0.4", features = ["std", "generic-queue-64"] }
+embedded-io-async = "0.7"
+embassy-time = { version = "0.5", features = ["std", "generic-queue-64"] }
 embassy-sync = "0.7"
 embassy-futures = "0.1.2"
-embedded-svc = { version = "0.28", features = ["std"] }
+embedded-svc = { git = "https://github.com/Luni-4/embedded-svc", branch = "deps", version = "0.28", features = ["std"] }
 futures-lite = "2"
 rand = "0.8"
 tokio = "1" # For the `mqtt_client` example

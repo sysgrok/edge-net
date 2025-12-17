@@ -22,6 +22,9 @@ impl<E> From<raw::Error> for Error<E> {
     }
 }
 
+#[cfg(not(feature = "std"))]
+impl<E: embedded_io_async::Error> core::error::Error for Error<E> {}
+
 impl<E> embedded_io_async::Error for Error<E>
 where
     E: embedded_io_async::Error,

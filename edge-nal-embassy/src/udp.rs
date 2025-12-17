@@ -1,3 +1,4 @@
+use core::fmt;
 use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use core::ptr::NonNull;
 
@@ -339,6 +340,22 @@ impl From<embassy_net::MulticastError> for UdpError {
         }
     }
 }
+
+impl fmt::Display for UdpError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Recv(e) => write!(f, "Receiver: {:?}", e),
+            Self::Send(e) => write!(f, "Sender: {:?}", e),
+            Self::Bind(e) => write!(f, "Binder: {:?}", e),
+            Self::MulticastGroupTableFull => write!(f, "Multicast group table full"),
+            Self::MulticastUnaddressable => write!(f, "Multicast unaddressable"),
+            Self::NoBuffers => write!(f, "No buffers"),
+            Self::UnsupportedProto => write!(f, "Unsupported protocol"),
+        }
+    }
+}
+
+impl core::error::Error for UdpError {}
 
 impl embedded_io_async::Error for UdpError {
     fn kind(&self) -> ErrorKind {

@@ -1,3 +1,4 @@
+use core::fmt;
 use core::net::SocketAddr;
 use core::pin::pin;
 use core::ptr::NonNull;
@@ -326,6 +327,20 @@ impl From<AcceptError> for TcpError {
         TcpError::Accept(e)
     }
 }
+
+impl fmt::Display for TcpError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::General(e) => write!(f, "General: {:?}", e),
+            Self::Connect(e) => write!(f, "Connect: {:?}", e),
+            Self::Accept(e) => write!(f, "Accept: {:?}", e),
+            Self::NoBuffers => write!(f, "No buffers"),
+            Self::UnsupportedProto => write!(f, "Unsupported protocol"),
+        }
+    }
+}
+
+impl core::error::Error for TcpError {}
 
 impl embedded_io_async::Error for TcpError {
     fn kind(&self) -> ErrorKind {

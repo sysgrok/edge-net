@@ -584,10 +584,17 @@ where
     }
 }
 
+#[cfg(not(feature = "std"))]
+impl<C: Debug + embedded_io_async::Error, E: Debug + Display> core::error::Error
+    for HandleRequestError<C, E>
+{
+}
+
+#[cfg(not(feature = "std"))]
 impl<C, E> embedded_io_async::Error for HandleRequestError<C, E>
 where
     C: Debug + embedded_io_async::Error,
-    E: Debug,
+    E: Debug + Display,
 {
     fn kind(&self) -> embedded_io_async::ErrorKind {
         match self {

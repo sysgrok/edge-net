@@ -113,12 +113,12 @@ sha1_smol = { version = "1", default-features = false }
 log = { version = "0.4", default-features = false }
 defmt = { version = "1", default-features = false, features = ["ip_in_core"] }
 
-edge-captive = { path = "edge-captive", default-features = false }
-edge-dhcp = { path = "edge-dhcp", default-features = false }
-edge-http = { path = "edge-http", default-features = false }
-edge-mdns = { path = "edge-mdns", default-features = false }
-edge-nal = { path = "edge-nal", default-features = false }
-edge-raw = { path = "edge-raw", default-features = false }
-edge-ws = { path = "edge-ws", default-features = false }
-edge-nal-std = { path = "edge-nal-std", default-features = false }
-edge-nal-embassy = { path = "edge-nal-embassy", default-features = false }
+edge-captive = { version = "0.7", path = "edge-captive", default-features = false }
+edge-dhcp = { version = "0.7", path = "edge-dhcp", default-features = false }
+edge-http = { version = "0.7", path = "edge-http", default-features = false }
+edge-mdns = { version = "0.7", path = "edge-mdns", default-features = false }
+edge-nal = { version = "0.6", path = "edge-nal", default-features = false }
+edge-raw = { version = "0.7", path = "edge-raw", default-features = false }
+edge-ws = { version = "0.7", path = "edge-ws", default-features = false }
+edge-nal-std = { version = "0.6", path = "edge-nal-std", default-features = false }
+edge-nal-embassy = { version = "0.8", path = "edge-nal-embassy", default-features = false }

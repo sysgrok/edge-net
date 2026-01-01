@@ -61,8 +61,7 @@ where
     }
 }
 
-#[cfg(feature = "std")]
-impl<E> std::error::Error for DnsIoError<E> where E: std::error::Error {}
+impl<E> core::error::Error for DnsIoError<E> where E: core::error::Error {}
 
 pub async fn run<S>(
     stack: &S,

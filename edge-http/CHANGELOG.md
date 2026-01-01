@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-01-01
+* Update the `embedded-io-async` and `edge-nal` dependencies
+* Remove the `embedded-svc` feature
+
 ## [0.6.1] - 2025-08-28
 * Updated the internal call to `embassy_futures::select_slice` which changed in `embassy-futures` V0.1.2 due to a soundness fix
 

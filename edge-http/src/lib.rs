@@ -60,6 +60,8 @@ impl defmt::Format for HeadersMismatchError {
     }
 }
 
+impl core::error::Error for HeadersMismatchError {}
+
 /// Http methods
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "std", derive(Hash))]
@@ -280,10 +282,10 @@ impl<'b, const N: usize> Headers<'b, N> {
         self.get("Upgrade")
     }
 
-    /// Iterate over all headers
+    /// Iterate over all headers which have valid UTF-8 values
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
         self.iter_raw()
-            .map(|(name, value)| (name, unsafe { str::from_utf8_unchecked(value) }))
+            .filter_map(|(name, value)| str::from_utf8(value).ok().map(|value| (name, value)))
     }
 
     /// Iterate over all headers, returning the values as raw byte slices
@@ -931,6 +933,8 @@ impl<const N: usize> defmt::Format for ResponseHeaders<'_, N> {
 
 /// Websocket utilities
 pub mod ws {
+    use base64::Engine;
+
     use crate::Method;
 
     pub const NONCE_LEN: usize = 16;
@@ -1024,8 +1028,7 @@ pub mod ws {
         }
     }
 
-    #[cfg(feature = "std")]
-    impl std::error::Error for UpgradeError {}
+    impl core::error::Error for UpgradeError {}
 
     /// Return ready-to-use WS upgrade response headers
     ///
@@ -1062,9 +1065,10 @@ pub mod ws {
                     ("Content-Length", "0"),
                     ("Connection", "Upgrade"),
                     ("Upgrade", "websocket"),
-                    ("Sec-WebSocket-Accept", unsafe {
-                        core::str::from_utf8_unchecked(&buf[..sec_key_resp_len])
-                    }),
+                    (
+                        "Sec-WebSocket-Accept",
+                        unwrap!(core::str::from_utf8(&buf[..sec_key_resp_len]).map_err(|_| ())),
+                    ),
                 ])
             } else {
                 Err(UpgradeError::NoSecKey)
@@ -1119,9 +1123,11 @@ pub mod ws {
     }
 
     fn sec_key_encode<'a>(nonce: &[u8], buf: &'a mut [u8]) -> &'a str {
-        let nonce_base64_len = base64::encode_config_slice(nonce, base64::STANDARD, buf);
+        let nonce_base64_len = unwrap!(base64::engine::general_purpose::STANDARD
+            .encode_slice(nonce, buf)
+            .map_err(|_| ()));
 
-        unsafe { core::str::from_utf8_unchecked(&buf[..nonce_base64_len]) }
+        unwrap!(core::str::from_utf8(&buf[..nonce_base64_len]).map_err(|_| ()))
     }
 
     /// Compute the response for a given `Sec-WebSocket-Key`
@@ -1146,9 +1152,11 @@ pub mod ws {
 
         sha1.update(WS_MAGIC_GUUID.as_bytes());
 
-        let len = base64::encode_config_slice(sha1.digest().bytes(), base64::STANDARD, buf);
+        let len = unwrap!(base64::engine::general_purpose::STANDARD
+            .encode_slice(sha1.digest().bytes(), buf)
+            .map_err(|_| ()));
 
-        let sec_key_response = unsafe { core::str::from_utf8_unchecked(&buf[..len]) };
+        let sec_key_response = unwrap!(core::str::from_utf8(&buf[..len]).map_err(|_| ()));
 
         debug!("Computed response: {}", sec_key_response);
 
@@ -1528,130 +1536,5 @@ mod test {
             )),
             BodyType::Raw
         );
-    }
-}
-
-#[cfg(feature = "embedded-svc")]
-mod embedded_svc_compat {
-    use core::str;
-
-    use embedded_svc::http::client::asynch::Method;
-
-    impl From<Method> for super::Method {
-        fn from(method: Method) -> Self {
-            match method {
-                Method::Delete => super::Method::Delete,
-                Method::Get => super::Method::Get,
-                Method::Head => super::Method::Head,
-                Method::Post => super::Method::Post,
-                Method::Put => super::Method::Put,
-                Method::Connect => super::Method::Connect,
-                Method::Options => super::Method::Options,
-                Method::Trace => super::Method::Trace,
-                Method::Copy => super::Method::Copy,
-                Method::Lock => super::Method::Lock,
-                Method::MkCol => super::Method::MkCol,
-                Method::Move => super::Method::Move,
-                Method::Propfind => super::Method::Propfind,
-                Method::Proppatch => super::Method::Proppatch,
-                Method::Search => super::Method::Search,
-                Method::Unlock => super::Method::Unlock,
-                Method::Bind => super::Method::Bind,
-                Method::Rebind => super::Method::Rebind,
-                Method::Unbind => super::Method::Unbind,
-                Method::Acl => super::Method::Acl,
-                Method::Report => super::Method::Report,
-                Method::MkActivity => super::Method::MkActivity,
-                Method::Checkout => super::Method::Checkout,
-                Method::Merge => super::Method::Merge,
-                Method::MSearch => super::Method::MSearch,
-                Method::Notify => super::Method::Notify,
-                Method::Subscribe => super::Method::Subscribe,
-                Method::Unsubscribe => super::Method::Unsubscribe,
-                Method::Patch => super::Method::Patch,
-                Method::Purge => super::Method::Purge,
-                Method::MkCalendar => super::Method::MkCalendar,
-                Method::Link => super::Method::Link,
-                Method::Unlink => super::Method::Unlink,
-            }
-        }
-    }
-
-    impl From<super::Method> for Method {
-        fn from(method: super::Method) -> Self {
-            match method {
-                super::Method::Delete => Method::Delete,
-                super::Method::Get => Method::Get,
-                super::Method::Head => Method::Head,
-                super::Method::Post => Method::Post,
-                super::Method::Put => Method::Put,
-                super::Method::Connect => Method::Connect,
-                super::Method::Options => Method::Options,
-                super::Method::Trace => Method::Trace,
-                super::Method::Copy => Method::Copy,
-                super::Method::Lock => Method::Lock,
-                super::Method::MkCol => Method::MkCol,
-                super::Method::Move => Method::Move,
-                super::Method::Propfind => Method::Propfind,
-                super::Method::Proppatch => Method::Proppatch,
-                super::Method::Search => Method::Search,
-                super::Method::Unlock => Method::Unlock,
-                super::Method::Bind => Method::Bind,
-                super::Method::Rebind => Method::Rebind,
-                super::Method::Unbind => Method::Unbind,
-                super::Method::Acl => Method::Acl,
-                super::Method::Report => Method::Report,
-                super::Method::MkActivity => Method::MkActivity,
-                super::Method::Checkout => Method::Checkout,
-                super::Method::Merge => Method::Merge,
-                super::Method::MSearch => Method::MSearch,
-                super::Method::Notify => Method::Notify,
-                super::Method::Subscribe => Method::Subscribe,
-                super::Method::Unsubscribe => Method::Unsubscribe,
-                super::Method::Patch => Method::Patch,
-                super::Method::Purge => Method::Purge,
-                super::Method::MkCalendar => Method::MkCalendar,
-                super::Method::Link => Method::Link,
-                super::Method::Unlink => Method::Unlink,
-            }
-        }
-    }
-
-    impl<const N: usize> embedded_svc::http::Query for super::RequestHeaders<'_, N> {
-        fn uri(&self) -> &'_ str {
-            self.path
-        }
-
-        fn method(&self) -> Method {
-            self.method.into()
-        }
-    }
-
-    impl<const N: usize> embedded_svc::http::Headers for super::RequestHeaders<'_, N> {
-        fn header(&self, name: &str) -> Option<&'_ str> {
-            self.headers.get(name)
-        }
-    }
-
-    impl<const N: usize> embedded_svc::http::Status for super::ResponseHeaders<'_, N> {
-        fn status(&self) -> u16 {
-            self.code
-        }
-
-        fn status_message(&self) -> Option<&'_ str> {
-            self.reason
-        }
-    }
-
-    impl<const N: usize> embedded_svc::http::Headers for super::ResponseHeaders<'_, N> {
-        fn header(&self, name: &str) -> Option<&'_ str> {
-            self.headers.get(name)
-        }
-    }
-
-    impl<const N: usize> embedded_svc::http::Headers for super::Headers<'_, N> {
-        fn header(&self, name: &str) -> Option<&'_ str> {
-            self.get(name)
-        }
     }
 }

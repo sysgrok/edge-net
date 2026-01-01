@@ -7,10 +7,6 @@
 pub type Fragmented = bool;
 pub type Final = bool;
 
-#[allow(unused)]
-#[cfg(feature = "embedded-svc")]
-pub use embedded_svc_compat::*;
-
 // This mod MUST go first, so that the others see its macros.
 pub(crate) mod fmt;
 
@@ -140,8 +136,7 @@ where
     }
 }
 
-#[cfg(feature = "std")]
-impl<E> std::error::Error for Error<E> where E: std::error::Error {}
+impl<E> core::error::Error for Error<E> where E: core::error::Error {}
 
 #[derive(Clone, Debug)]
 pub struct FrameHeader {
@@ -355,43 +350,5 @@ impl defmt::Format for FrameHeader {
             self.payload_len,
             self.mask_key
         )
-    }
-}
-
-#[cfg(feature = "embedded-svc")]
-mod embedded_svc_compat {
-    use core::convert::TryFrom;
-
-    use embedded_svc::ws::FrameType;
-
-    impl From<super::FrameType> for FrameType {
-        fn from(frame_type: super::FrameType) -> Self {
-            match frame_type {
-                super::FrameType::Text(v) => Self::Text(v),
-                super::FrameType::Binary(v) => Self::Binary(v),
-                super::FrameType::Ping => Self::Ping,
-                super::FrameType::Pong => Self::Pong,
-                super::FrameType::Close => Self::Close,
-                super::FrameType::Continue(v) => Self::Continue(v),
-            }
-        }
-    }
-
-    impl TryFrom<FrameType> for super::FrameType {
-        type Error = FrameType;
-
-        fn try_from(frame_type: FrameType) -> Result<Self, Self::Error> {
-            let f = match frame_type {
-                FrameType::Text(v) => Self::Text(v),
-                FrameType::Binary(v) => Self::Binary(v),
-                FrameType::Ping => Self::Ping,
-                FrameType::Pong => Self::Pong,
-                FrameType::Close => Self::Close,
-                FrameType::SocketClose => Err(FrameType::SocketClose)?,
-                FrameType::Continue(v) => Self::Continue(v),
-            };
-
-            Ok(f)
-        }
     }
 }

@@ -4,9 +4,6 @@ use embedded_io_async::{self, Read, ReadExactError, Write};
 
 use super::*;
 
-#[cfg(feature = "embedded-svc")]
-pub use embedded_svc_compat::*;
-
 pub type Error<E> = super::Error<E>;
 
 impl<E> Error<E>
@@ -164,66 +161,4 @@ where
 
     header.send(&mut write).await?;
     header.send_payload(write, frame_data_buf).await
-}
-
-#[cfg(feature = "embedded-svc")]
-mod embedded_svc_compat {
-    use core::convert::TryInto;
-
-    use embedded_io_async::{Read, Write};
-    use embedded_svc::io::ErrorType as IoErrorType;
-    use embedded_svc::ws::asynch::Sender;
-    use embedded_svc::ws::ErrorType;
-    use embedded_svc::ws::{asynch::Receiver, FrameType};
-
-    use super::Error;
-
-    pub struct WsConnection<T, M>(T, M);
-
-    impl<T, M> WsConnection<T, M> {
-        pub const fn new(connection: T, mask_gen: M) -> Self {
-            Self(connection, mask_gen)
-        }
-    }
-
-    impl<T, M> ErrorType for WsConnection<T, M>
-    where
-        T: IoErrorType,
-    {
-        type Error = Error<T::Error>;
-    }
-
-    impl<T, M> Receiver for WsConnection<T, M>
-    where
-        T: Read,
-    {
-        async fn recv(
-            &mut self,
-            frame_data_buf: &mut [u8],
-        ) -> Result<(FrameType, usize), Self::Error> {
-            super::recv(&mut self.0, frame_data_buf)
-                .await
-                .map(|(frame_type, payload_len)| (frame_type.into(), payload_len))
-        }
-    }
-
-    impl<T, M> Sender for WsConnection<T, M>
-    where
-        T: Write,
-        M: Fn() -> Option<u32>,
-    {
-        async fn send(
-            &mut self,
-            frame_type: FrameType,
-            frame_data: &[u8],
-        ) -> Result<(), Self::Error> {
-            super::send(
-                &mut self.0,
-                unwrap!(frame_type.try_into(), "Invalid frame type"),
-                (self.1)(),
-                frame_data,
-            )
-            .await
-        }
-    }
 }

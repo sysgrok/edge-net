@@ -1,3 +1,4 @@
+use core::fmt::Display;
 use core::net::IpAddr;
 
 use edge_nal::AddrType;
@@ -64,6 +65,14 @@ impl From<Error> for DnsError {
         DnsError(e)
     }
 }
+
+impl Display for DnsError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "DNS error: {:?}", self.0)
+    }
+}
+
+impl core::error::Error for DnsError {}
 
 impl embedded_io_async::Error for DnsError {
     fn kind(&self) -> ErrorKind {

@@ -1,7 +1,8 @@
 [package]
 name = "edge-mdns"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
+rust-version = "1.87"
 description = "Async + `no_std` + no-alloc implementation of an mDNS responder"
 repository = "https://github.com/ivmarkov/edge-net"
 readme = "README.md"
@@ -17,14 +18,15 @@ categories = [
 default = ["io"]
 std = ["io"]
 io = ["embassy-futures", "embassy-sync", "embassy-time", "edge-nal"]
-defmt = ["dep:defmt", "heapless/defmt-03"]
+defmt = ["dep:defmt", "heapless/defmt"]
 
 [dependencies]
-log = { version = "0.4", default-features = false, optional = true }
-defmt = { version = "0.3", optional = true, features = ["ip_in_core"] }
+log = { workspace = true, default-features = false, optional = true }
+defmt = { workspace = true, default-features = false, optional = true }
 heapless = { workspace = true }
 domain = { workspace = true }
 embassy-futures = { workspace = true, optional = true }
 embassy-sync = { workspace = true, optional = true }
 embassy-time = { workspace = true, optional = true }
 edge-nal = { workspace = true, optional = true }
+rand_core = { workspace = true }

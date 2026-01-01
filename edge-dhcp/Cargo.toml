@@ -1,8 +1,8 @@
 [package]
 name = "edge-dhcp"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
-rust-version = "1.83"
+rust-version = "1.87"
 description = "Async + `no_std` + no-alloc implementation of the DHCP protocol"
 repository = "https://github.com/ivmarkov/edge-net"
 readme = "README.md"
@@ -18,15 +18,15 @@ categories = [
 default = ["io"]
 std = ["io"]
 io = ["embassy-futures", "embassy-time", "edge-nal"]
-defmt = ["dep:defmt", "heapless/defmt-03", "embassy-time?/defmt"]
+defmt = ["dep:defmt", "heapless/defmt", "embassy-time?/defmt"]
 
 [dependencies]
 heapless = { workspace = true }
-log = { version = "0.4", default-features = false, optional = true }
-defmt = { version = "0.3", optional = true, features = ["ip_in_core"] }
-rand_core = "0.6"
+log = { workspace = true, default-features = false, optional = true }
+defmt = { workspace = true, default-features = false, optional = true }
+rand_core = { workspace = true, default-features = false }
+num_enum = { workspace = true, default-features = false }
 embassy-futures = { workspace = true, optional = true }
 embassy-time = { workspace = true, default-features = false, optional = true }
 edge-nal = { workspace = true, optional = true }
-num_enum = { version = "0.7", default-features = false }
 edge-raw = { workspace = true, default-features = false }

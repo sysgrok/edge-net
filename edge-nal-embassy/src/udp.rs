@@ -1,3 +1,4 @@
+use core::fmt::Display;
 use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use core::ptr::NonNull;
 
@@ -326,6 +327,26 @@ impl From<BindError> for UdpError {
         UdpError::Bind(e)
     }
 }
+
+impl Display for UdpError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            UdpError::Recv(e) => write!(f, "UDP receive error: {:?}", e),
+            UdpError::Send(e) => write!(f, "UDP send error: {:?}", e),
+            UdpError::Bind(e) => write!(f, "UDP bind error: {:?}", e),
+            UdpError::MulticastGroupTableFull => {
+                write!(f, "UDP multicast group table is full")
+            }
+            UdpError::MulticastUnaddressable => {
+                write!(f, "UDP multicast address is unaddressable")
+            }
+            UdpError::NoBuffers => write!(f, "No UDP socket buffers available"),
+            UdpError::UnsupportedProto => write!(f, "Unsupported protocol"),
+        }
+    }
+}
+
+impl core::error::Error for UdpError {}
 
 #[cfg(all(
     feature = "multicast",

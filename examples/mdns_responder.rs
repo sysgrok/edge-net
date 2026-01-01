@@ -11,8 +11,6 @@ use embassy_sync::signal::Signal;
 
 use log::*;
 
-use rand::{thread_rng, RngCore};
-
 // Change this to the IP address of the machine where you'll run this example
 const OUR_IP: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
 
@@ -63,16 +61,16 @@ where
 
     // A way to notify the mDNS responder that the data in `Host` had changed
     // We don't use it in this example, because the data is hard-coded
-    let signal = Signal::new();
+    let signal = Signal::<NoopRawMutex, _>::new();
 
-    let mdns = io::Mdns::<NoopRawMutex, _, _, _, _>::new(
+    let mdns = io::Mdns::new(
         Some(Ipv4Addr::UNSPECIFIED),
         Some(0),
         recv,
         send,
         recv_buf,
         send_buf,
-        |buf| thread_rng().fill_bytes(buf),
+        rand::rng(),
         &signal,
     );
 

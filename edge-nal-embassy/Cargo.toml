@@ -1,8 +1,8 @@
 [package]
 name = "edge-nal-embassy"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
-rust-version = "1.83"
+rust-version = "1.87"
 description = "An implementation of edge-nal based on `embassy-net`"
 repository = "https://github.com/ivmarkov/edge-net"
 readme = "README.md"
@@ -17,7 +17,7 @@ categories = [
 [features]
 default = ["all"]
 all = ["proto-ipv4", "proto-ipv6", "medium-ethernet", "medium-ip", "dns", "udp", "tcp", "multicast", "icmp", "dhcpv4", "dhcpv4-hostname"]
-defmt = ["dep:defmt", "heapless/defmt-03", "embassy-net/defmt"]
+defmt = ["dep:defmt", "heapless/defmt", "embassy-net/defmt"]
 proto-ipv4 = ["embassy-net/proto-ipv4"]
 proto-ipv6 = ["embassy-net/proto-ipv6"]
 medium-ethernet = ["embassy-net/medium-ethernet"]
@@ -31,10 +31,10 @@ dhcpv4 = ["embassy-net/dhcpv4"]
 dhcpv4-hostname = ["embassy-net/dhcpv4-hostname"]
 
 [dependencies]
-log = { version = "0.4", default-features = false, optional = true }
-defmt = { version = "0.3", optional = true }
+log = { workspace = true, default-features = false, optional = true }
+defmt = { workspace = true, default-features = false, optional = true }
 embedded-io-async = { workspace = true }
 edge-nal = { workspace = true }
 heapless = { workspace = true }
-embassy-net = "0.7"
+embassy-net = { workspace = true }
 embassy-futures = { workspace = true }

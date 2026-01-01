@@ -1,25 +1,24 @@
 [package]
 name = "edge-net"
-version = "0.12.0"
+version = "0.13.0"
 authors = ["Ivan Markov <ivan.markov@gmail.com>"]
 edition = "2021"
 categories = ["embedded", "hardware-support", "network-programming", "asynchronous"]
 keywords = ["embedded", "network"]
 description = "no_std and no-alloc async implementations of various network protocols."
+rust-version = "1.87"
 repository = "https://github.com/ivmarkov/edge-net"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-rust-version = "1.83"
 
 [features]
 default = ["io"]
 async-io-mini = ["std", "edge-nal-std/async-io-mini"]
-std = ["io", "edge-captive/std", "edge-dhcp/std", "edge-http/std", "edge-mdns/std", "edge-raw/std", "edge-mqtt", "edge-ws/std", "edge-nal-std"]
+std = ["io", "edge-captive/std", "edge-dhcp/std", "edge-http/std", "edge-mdns/std", "edge-raw/std", "edge-ws/std", "edge-nal-std"]
 embassy = ["io", "edge-nal-embassy/all"]
 io = ["edge-captive/io", "edge-dhcp/io", "edge-http/io", "edge-mdns/io", "edge-raw/io", "edge-ws/io", "edge-nal"]
 log = ["edge-captive/log", "edge-dhcp/log", "edge-http/log", "edge-mdns/log", "edge-raw/log", "edge-ws/log", "edge-nal-embassy?/log"]
 defmt = ["edge-captive/defmt", "edge-dhcp/defmt", "edge-http/defmt", "edge-mdns/defmt", "edge-raw/defmt", "edge-ws/defmt", "edge-nal-embassy?/defmt"]
-embedded-svc = ["edge-http/embedded-svc", "edge-mqtt/embedded-svc", "edge-ws/embedded-svc"]
 nightly = []
 
 [dependencies]
@@ -27,7 +26,6 @@ edge-captive = { workspace = true }
 edge-dhcp = { workspace = true }
 edge-http = { workspace = true }
 edge-mdns = { workspace = true }
-edge-mqtt = { workspace = true, optional = true }
 edge-nal = { workspace = true, optional = true }
 edge-raw = { workspace = true }
 edge-ws = { workspace = true }
@@ -37,16 +35,13 @@ edge-nal-embassy = { workspace = true, optional = true }
 [dev-dependencies]
 log = "0.4"
 anyhow = "1"
-env_logger = "0.10"
-embedded-io-async = "0.6"
-embassy-time = { version = "0.4", features = ["std", "generic-queue-64"] }
+env_logger = "0.11"
+embedded-io-async = "0.7"
+embassy-time = { version = "0.5", features = ["std", "generic-queue-64"] }
 embassy-sync = "0.7"
 embassy-futures = "0.1.2"
-embedded-svc = { version = "0.28", features = ["std"] }
 futures-lite = "2"
-rand = "0.8"
-tokio = "1" # For the `mqtt_client` example
-async-compat = "0.2" # For the `mqtt_client` example
+rand = "0.9"
 
 [[example]]
 name = "captive_portal"
@@ -88,10 +83,6 @@ required-features = ["std"]
 name = "nal_std"
 required-features = ["std"]
 
-[[example]]
-name = "mqtt_client"
-required-features = ["std", "embedded-svc"]
-
 [workspace]
 members = [
     ".",
@@ -99,7 +90,6 @@ members = [
     "edge-dhcp",
     "edge-http",
     "edge-mdns",
-    "edge-mqtt",
     "edge-nal",
     "edge-raw",
     "edge-ws",
@@ -110,19 +100,25 @@ members = [
 [workspace.dependencies]
 embassy-futures = { version = "0.1.2", default-features = false }
 embassy-sync = { version = "0.7", default-features = false }
-embassy-time = { version = "0.4", default-features = false }
-embedded-io-async = { version = "0.6", default-features = false }
-embedded-svc = { version = "0.28", default-features = false }
-heapless = { version = "0.8", default-features = false }
-domain = { version = "0.10", default-features = false, features = ["heapless"] }
+embassy-time = { version = "0.5", default-features = false }
+embedded-io-async = { version = "0.7", default-features = false }
+embassy-net = { version = "0.7", default-features = false }
+heapless = { version = "0.9", default-features = false }
+domain = { version = "0.11", default-features = false, features = ["heapless"] }
+rand_core = { version = "0.9", default-features = false }
+num_enum = { version = "0.7", default-features = false }
+httparse = { version = "1.10", default-features = false }
+base64 = { version = "0.22", default-features = false }
+sha1_smol = { version = "1", default-features = false }
+log = { version = "0.4", default-features = false }
+defmt = { version = "1", default-features = false, features = ["ip_in_core"] }
 
-edge-captive = { version = "0.6.0", path = "edge-captive", default-features = false }
-edge-dhcp = { version = "0.6.0", path = "edge-dhcp", default-features = false }
-edge-http = { version = "0.6.0", path = "edge-http", default-features = false }
-edge-mdns = { version = "0.6.1", path = "edge-mdns", default-features = false }
-edge-mqtt = { version = "0.4.0", path = "edge-mqtt", default-features = false }
-edge-nal = { version = "0.5.0", path = "edge-nal", default-features = false }
-edge-raw = { version = "0.6.0", path = "edge-raw", default-features = false }
-edge-ws = { version = "0.5.0", path = "edge-ws", default-features = false }
-edge-nal-std = { version = "0.5.1", path = "edge-nal-std", default-features = false }
-edge-nal-embassy = { version = "0.7.0", path = "edge-nal-embassy", default-features = false }
+edge-captive = { path = "edge-captive", default-features = false }
+edge-dhcp = { path = "edge-dhcp", default-features = false }
+edge-http = { path = "edge-http", default-features = false }
+edge-mdns = { path = "edge-mdns", default-features = false }
+edge-nal = { path = "edge-nal", default-features = false }
+edge-raw = { path = "edge-raw", default-features = false }
+edge-ws = { path = "edge-ws", default-features = false }
+edge-nal-std = { path = "edge-nal-std", default-features = false }
+edge-nal-embassy = { path = "edge-nal-embassy", default-features = false }

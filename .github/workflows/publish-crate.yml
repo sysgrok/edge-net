@@ -15,7 +15,6 @@ on:
         - edge-dhcp
         - edge-http
         - edge-mdns
-        - edge-mqtt
         - edge-raw
         - edge-ws
 

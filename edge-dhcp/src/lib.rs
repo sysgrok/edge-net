@@ -75,8 +75,7 @@ impl defmt::Format for Error {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for Error {}
+impl core::error::Error for Error {}
 
 ///
 /// DHCP Message Type.

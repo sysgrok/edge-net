@@ -16,10 +16,6 @@ use super::{send_headers, send_status, Body, Error, RequestHeaders, SendBody};
 use crate::ws::{upgrade_response_headers, MAX_BASE64_KEY_RESPONSE_LEN};
 use crate::{ConnectionType, DEFAULT_MAX_HEADERS_COUNT};
 
-#[allow(unused_imports)]
-#[cfg(feature = "embedded-svc")]
-pub use embedded_svc_compat::*;
-
 pub const DEFAULT_HANDLER_TASKS_COUNT: usize = 4;
 pub const DEFAULT_BUF_SIZE: usize = 2048;
 
@@ -586,8 +582,8 @@ where
 
 impl<C, E> embedded_io_async::Error for HandleRequestError<C, E>
 where
-    C: Debug + embedded_io_async::Error,
-    E: Debug,
+    C: Debug + core::error::Error + embedded_io_async::Error,
+    E: Debug + core::error::Error,
 {
     fn kind(&self) -> embedded_io_async::ErrorKind {
         match self {
@@ -597,11 +593,10 @@ where
     }
 }
 
-#[cfg(feature = "std")]
-impl<C, E> std::error::Error for HandleRequestError<C, E>
+impl<C, E> core::error::Error for HandleRequestError<C, E>
 where
-    C: std::error::Error,
-    E: std::error::Error,
+    C: core::error::Error,
+    E: core::error::Error,
 {
 }
 
@@ -764,112 +759,4 @@ impl<const P: usize, const B: usize, const N: usize> Default for Server<P, B, N>
     fn default() -> Self {
         Self::new()
     }
-}
-
-#[cfg(feature = "embedded-svc")]
-mod embedded_svc_compat {
-    use embedded_io_async::{Read, Write};
-
-    use embedded_svc::http::server::asynch::{Connection, Headers, Query};
-
-    use crate::io::Body;
-    use crate::RequestHeaders;
-
-    impl<T, const N: usize> Headers for super::Connection<'_, T, N>
-    where
-        T: Read + Write,
-    {
-        fn header(&self, name: &str) -> Option<&'_ str> {
-            self.request_ref()
-                .expect("Not in request mode")
-                .request
-                .header(name)
-        }
-    }
-
-    impl<T, const N: usize> Query for super::Connection<'_, T, N>
-    where
-        T: Read + Write,
-    {
-        fn uri(&self) -> &'_ str {
-            self.request_ref()
-                .expect("Not in request mode")
-                .request
-                .uri()
-        }
-
-        fn method(&self) -> embedded_svc::http::Method {
-            self.request_ref()
-                .expect("Not in request mode")
-                .request
-                .method()
-        }
-    }
-
-    impl<'b, T, const N: usize> Connection for super::Connection<'b, T, N>
-    where
-        T: Read + Write,
-    {
-        type Headers = RequestHeaders<'b, N>;
-
-        type Read = Body<'b, T>;
-
-        type RawConnectionError = T::Error;
-
-        type RawConnection = T;
-
-        fn split(&mut self) -> (&Self::Headers, &mut Self::Read) {
-            super::Connection::split(self)
-        }
-
-        async fn initiate_response(
-            &mut self,
-            status: u16,
-            message: Option<&str>,
-            headers: &[(&str, &str)],
-        ) -> Result<(), Self::Error> {
-            super::Connection::initiate_response(self, status, message, headers).await
-        }
-
-        fn is_response_initiated(&self) -> bool {
-            super::Connection::is_response_initiated(self)
-        }
-
-        fn raw_connection(&mut self) -> Result<&mut Self::RawConnection, Self::Error> {
-            // TODO: Needs a GAT rather than `&mut` return type
-            // or `embedded-svc` fully upgraded to async traits & `embedded-io` 0.4 to re-enable
-            //ServerConnection::raw_connection(self).map(EmbIo)
-            panic!("Not supported")
-        }
-    }
-
-    // NOTE: Currently, the `edge-http` and the `embedded-svc` Handler traits are
-    // incompatible, in that the `edge-http` async `Handler`'s `handle` method is generic,
-    // while the `embedded-svc` `Handler`'s `handle` method is not.
-    //
-    // Code below is commented out until `embedded-svc`'s `Handler` signature is changed
-    // to match the `edge-http` `Handler` signature.
-
-    // pub struct SvcHandler<H>(H);
-
-    // impl<'b, T, const N: usize, H> Handler for SvcHandler<H>
-    // where
-    //     H: embedded_svc::http::server::asynch::Handler<super::Connection<'b, T, N>>,
-    //     T: Read + Write,
-    // {
-    //     type Error<E> = Error<E> where E: Debug;
-
-    //     async fn handle<T, const N: usize>(
-    //         &self,
-    //         _task_id: impl core::fmt::Display + Copy,
-    //         connection: &mut super::Connection<'_, T, N>,
-    //     ) -> Result<(), Self::Error<T::Error>>
-    //     where
-    //         T: Read + Write,
-    //     {
-    //         unwrap!(self.0.handle(connection).await);
-
-    //         Ok(())
-    //     }
-    // }
 }

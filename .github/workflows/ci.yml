@@ -18,7 +18,7 @@ jobs:
       matrix:
         rust_toolchain:
           - nightly
-          - 1.83 # MSRV
+          - 1.87 # MSRV
 
     steps:
       - name: Setup | Checkout
@@ -35,11 +35,11 @@ jobs:
       - name: Build | Fmt Check
         run: cargo fmt -- --check
       - name: Build | Clippy
-        run: cargo clippy --features std,embedded-svc,edge-nal-embassy/all --examples --no-deps -- -Dwarnings
+        run: cargo clippy --features std,edge-nal-embassy/all --examples --no-deps -- -Dwarnings
       - name: Build | Clippy - defmt
-        run: cargo clippy --features std,embedded-svc,edge-nal-embassy/all,defmt --no-deps -- -Dwarnings
+        run: cargo clippy --features std,edge-nal-embassy/all,defmt --no-deps -- -Dwarnings
       - name: Build | Clippy - log
-        run: cargo clippy --features std,embedded-svc,edge-nal-embassy/all,log --examples --no-deps -- -Dwarnings
+        run: cargo clippy --features std,edge-nal-embassy/all,log --examples --no-deps -- -Dwarnings
       - name: Build | Default
         run: cargo build --features log
       - name: Build | Non-default

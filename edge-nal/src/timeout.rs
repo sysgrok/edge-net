@@ -45,6 +45,8 @@ where
     }
 }
 
+impl<E> core::error::Error for WithTimeoutError<E> where E: core::error::Error {}
+
 impl<E> embedded_io_async::Error for WithTimeoutError<E>
 where
     E: embedded_io_async::Error,

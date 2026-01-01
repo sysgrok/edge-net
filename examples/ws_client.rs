@@ -7,7 +7,7 @@ use edge_http::ws::{MAX_BASE64_KEY_LEN, MAX_BASE64_KEY_RESPONSE_LEN, NONCE_LEN};
 use edge_nal::{AddrType, Dns, TcpConnect};
 use edge_ws::{FrameHeader, FrameType};
 
-use rand::{thread_rng, RngCore};
+use rand::RngCore;
 
 use log::*;
 
@@ -47,7 +47,7 @@ where
 
     let mut conn: Connection<_> = Connection::new(buf, stack, SocketAddr::new(ip, port));
 
-    let mut rng_source = thread_rng();
+    let mut rng_source = rand::rng();
 
     let mut nonce = [0_u8; NONCE_LEN];
     rng_source.fill_bytes(&mut nonce);

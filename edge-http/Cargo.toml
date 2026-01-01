@@ -1,8 +1,8 @@
 [package]
 name = "edge-http"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
-rust-version = "1.83"
+rust-version = "1.87"
 description = "Async + `no_std` + no-alloc implementation of the HTTP protocol"
 repository = "https://github.com/ivmarkov/edge-net"
 readme = "README.md"
@@ -19,18 +19,17 @@ categories = [
 default = ["io"]
 std = ["io"]
 io = ["embedded-io-async", "edge-nal", "embassy-sync", "embassy-futures", "embassy-time"]
-defmt = ["dep:defmt", "heapless/defmt-03", "embedded-svc?/defmt"]
+defmt = ["dep:defmt", "heapless/defmt"]
 
 [dependencies]
+log = { workspace = true, default-features = false, optional = true }
+defmt = { workspace = true, default-features = false, optional = true }
 embedded-io-async = { workspace = true, optional = true }
 edge-nal = { workspace = true, optional = true }
-embedded-svc = { workspace = true, optional = true, default-features = false }
 heapless = { workspace = true }
-log = { version = "0.4", default-features = false, optional = true }
-defmt = { version = "0.3", optional = true }
+httparse = { workspace = true, default-features = false }
+base64 = { workspace = true, default-features = false }
+sha1_smol = { workspace = true, default-features = false }
 embassy-sync = { workspace = true, optional = true }
 embassy-futures = { workspace = true, optional = true }
 embassy-time = { workspace = true, optional = true }
-httparse = { version = "1.7", default-features = false }
-base64 = { version = "0.13", default-features = false }
-sha1_smol = { version = "1", default-features = false }

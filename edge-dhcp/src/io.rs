@@ -60,5 +60,4 @@ where
     }
 }
 
-#[cfg(feature = "std")]
-impl<E> std::error::Error for Error<E> where E: std::error::Error {}
+impl<E> core::error::Error for Error<E> where E: core::error::Error {}

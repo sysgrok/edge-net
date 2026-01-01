@@ -53,8 +53,7 @@ impl defmt::Format for DnsError {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for DnsError {}
+impl core::error::Error for DnsError {}
 
 impl From<ShortBuf> for DnsError {
     fn from(_: ShortBuf) -> Self {

@@ -7,7 +7,7 @@ use buf::BufferAccess;
 
 use embassy_futures::select::{select, Either};
 use embassy_sync::blocking_mutex;
-use embassy_sync::blocking_mutex::raw::RawMutex;
+use embassy_sync::blocking_mutex::raw::{NoopRawMutex, RawMutex};
 use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
 
@@ -99,8 +99,7 @@ where
     }
 }
 
-#[cfg(feature = "std")]
-impl<E> std::error::Error for MdnsIoError<E> where E: std::error::Error {}
+impl<E> core::error::Error for MdnsIoError<E> where E: core::error::Error {}
 
 /// A utility method to bind a socket suitable for mDNS, by using the provided
 /// stack and address, and optionally joining the provided interfaces via multicast.
@@ -143,7 +142,7 @@ where
 /// The handler is expected to be a type that implements the `MdnsHandler` trait, which
 /// allows it to handle mDNS queries and generate responses, as well as to handle mDNS
 /// responses to queries which we might have issues using the `query` method.
-pub struct Mdns<'a, M, R, S, RB, SB>
+pub struct Mdns<'a, R, S, RB, SB, C, M = NoopRawMutex>
 where
     M: RawMutex,
 {
@@ -153,18 +152,19 @@ where
     send: Mutex<M, S>,
     recv_buf: RB,
     send_buf: SB,
-    rand: fn(&mut [u8]),
+    rand: blocking_mutex::Mutex<M, RefCell<C>>,
     broadcast_signal: &'a Signal<M, ()>,
     wait_readable: bool,
 }
 
-impl<'a, M, R, S, RB, SB> Mdns<'a, M, R, S, RB, SB>
+impl<'a, R, S, RB, SB, C, M> Mdns<'a, R, S, RB, SB, C, M>
 where
-    M: RawMutex,
     R: UdpReceive + Readable,
     S: UdpSend<Error = R::Error>,
     RB: BufferAccess<[u8]>,
     SB: BufferAccess<[u8]>,
+    C: rand_core::RngCore,
+    M: RawMutex,
 {
     /// Creates a new mDNS service with the provided handler, interfaces, and UDP receiver and sender.
     #[allow(clippy::too_many_arguments)]
@@ -175,7 +175,7 @@ where
         send: S,
         recv_buf: RB,
         send_buf: SB,
-        rand: fn(&mut [u8]),
+        rand: C,
         broadcast_signal: &'a Signal<M, ()>,
     ) -> Self {
         Self {
@@ -185,7 +185,7 @@ where
             send: Mutex::new(send),
             recv_buf,
             send_buf,
-            rand,
+            rand: blocking_mutex::Mutex::new(RefCell::new(rand)),
             broadcast_signal,
             wait_readable: false,
         }
@@ -414,7 +414,7 @@ where
 
     async fn delay(&self) {
         let mut b = [0];
-        (self.rand)(&mut b);
+        self.rand.lock(|rand| rand.borrow_mut().fill_bytes(&mut b));
 
         // Generate a delay between 20 and 120 ms, as per spec
         let delay_ms = 20 + (b[0] as u32 * 100 / 256);

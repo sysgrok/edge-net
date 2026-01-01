@@ -13,10 +13,6 @@ use crate::{
 
 use super::{send_headers, send_request, Body, Error, ResponseHeaders, SendBody};
 
-#[allow(unused_imports)]
-#[cfg(feature = "embedded-svc")]
-pub use embedded_svc_compat::*;
-
 use super::Method;
 
 const COMPLETION_BUF_SIZE: usize = 64;
@@ -475,85 +471,5 @@ where
 {
     fn needs_close(&self) -> bool {
         matches!(self.connection_type, ConnectionType::Close) || self.io.needs_close()
-    }
-}
-
-#[cfg(feature = "embedded-svc")]
-mod embedded_svc_compat {
-    use super::*;
-
-    use embedded_svc::http::client::asynch::{Connection, Headers, Method, Status};
-
-    impl<T, const N: usize> Headers for super::Connection<'_, T, N>
-    where
-        T: TcpConnect,
-    {
-        fn header(&self, name: &str) -> Option<&'_ str> {
-            let response = self.response_ref().expect("Not in response state");
-
-            response.response.header(name)
-        }
-    }
-
-    impl<T, const N: usize> Status for super::Connection<'_, T, N>
-    where
-        T: TcpConnect,
-    {
-        fn status(&self) -> u16 {
-            let response = self.response_ref().expect("Not in response state");
-
-            response.response.status()
-        }
-
-        fn status_message(&self) -> Option<&'_ str> {
-            let response = self.response_ref().expect("Not in response state");
-
-            response.response.status_message()
-        }
-    }
-
-    impl<'b, T, const N: usize> Connection for super::Connection<'b, T, N>
-    where
-        T: TcpConnect,
-    {
-        type Read = Body<'b, T::Socket<'b>>;
-
-        type Headers = ResponseHeaders<'b, N>;
-
-        type RawConnectionError = T::Error;
-
-        type RawConnection = T::Socket<'b>;
-
-        async fn initiate_request(
-            &mut self,
-            method: Method,
-            uri: &str,
-            headers: &[(&str, &str)],
-        ) -> Result<(), Self::Error> {
-            super::Connection::initiate_request(self, true, method.into(), uri, headers).await
-        }
-
-        fn is_request_initiated(&self) -> bool {
-            super::Connection::is_request_initiated(self)
-        }
-
-        async fn initiate_response(&mut self) -> Result<(), Self::Error> {
-            super::Connection::initiate_response(self).await
-        }
-
-        fn is_response_initiated(&self) -> bool {
-            super::Connection::is_response_initiated(self)
-        }
-
-        fn split(&mut self) -> (&Self::Headers, &mut Self::Read) {
-            super::Connection::split(self)
-        }
-
-        fn raw_connection(&mut self) -> Result<&mut Self::RawConnection, Self::Error> {
-            // TODO: Needs a GAT rather than `&mut` return type
-            // or `embedded-svc` fully upgraded to async traits & `embedded-io` 0.4 to re-enable
-            //ClientConnection::raw_connection(self).map(EmbIo)
-            panic!("Not supported")
-        }
     }
 }

@@ -65,8 +65,7 @@ impl defmt::Format for MdnsError {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for MdnsError {}
+impl core::error::Error for MdnsError {}
 
 impl From<ShortBuf> for MdnsError {
     fn from(_: ShortBuf) -> Self {

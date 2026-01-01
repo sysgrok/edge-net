@@ -1,8 +1,8 @@
 [package]
 name = "edge-raw"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
-rust-version = "1.83"
+rust-version = "1.87"
 description = "Async + `no_std` + no-alloc implementation of IP and UDP packet creation and parsing"
 repository = "https://github.com/ivmarkov/edge-net"
 readme = "README.md"
@@ -20,7 +20,7 @@ std = ["io"]
 io = ["embedded-io-async", "edge-nal"]
 
 [dependencies]
-log = { version = "0.4", default-features = false, optional = true }
-defmt = { version = "0.3", optional = true }
+log = { workspace = true, default-features = false, optional = true }
+defmt = { workspace = true, default-features = false, optional = true }
 embedded-io-async = { workspace = true, default-features = false, optional = true }
 edge-nal = { workspace = true, default-features = false, optional = true }

@@ -37,7 +37,7 @@ fn main() {
 }
 
 async fn run(if_index: u32, if_mac: MacAddr) -> Result<(), anyhow::Error> {
-    let mut client = Client::new(rand::thread_rng(), if_mac);
+    let mut client = Client::new(rand::rng(), if_mac);
 
     let stack = edge_nal_std::Interface::new(if_index);
     let mut buf = [0; 1500];

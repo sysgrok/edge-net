@@ -139,8 +139,7 @@ where
     }
 }
 
-#[cfg(feature = "std")]
-impl<E> std::error::Error for Error<E> where E: std::error::Error {}
+impl<E> core::error::Error for Error<E> where E: core::error::Error {}
 
 impl<'b, const N: usize> RequestHeaders<'b, N> {
     /// Parse the headers from the input stream
@@ -736,9 +735,7 @@ where
         let mut digits = [0_u8; 16];
 
         let slice = match self.parse_digits(&mut digits[..]).await? {
-            // This is safe because the following call to `from_str_radix` does
-            // its own verification on the bytes.
-            Some(s) => unsafe { str::from_utf8_unchecked(s) },
+            Some(s) => str::from_utf8(s).map_err(|_| Error::InvalidBody)?,
             None => return Ok(None),
         };
 
@@ -1246,7 +1243,7 @@ mod raw {
 
         for (name, value) in headers.into_iter() {
             let header_connection =
-                ConnectionType::from_header(name, unsafe { str::from_utf8_unchecked(value) });
+                ConnectionType::from_header(name, str::from_utf8(value).unwrap_or(""));
 
             if let Some(header_connection) = header_connection {
                 if let Some(connection) = connection {
@@ -1260,8 +1257,7 @@ mod raw {
                 connection = Some(header_connection);
             }
 
-            let header_body =
-                BodyType::from_header(name, unsafe { str::from_utf8_unchecked(value) });
+            let header_body = BodyType::from_header(name, str::from_utf8(value).unwrap_or(""));
 
             if let Some(header_body) = header_body {
                 if let Some(body) = body {

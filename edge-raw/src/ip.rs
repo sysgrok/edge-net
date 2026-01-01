@@ -110,7 +110,10 @@ impl Ipv4PacketHeader {
         let mut bytes = BytesOut::new(buf);
 
         bytes
-            .byte((self.version << 4) | (self.hlen / 4 + (if self.hlen % 4 > 0 { 1 } else { 0 })))?
+            .byte(
+                (self.version << 4)
+                    | (self.hlen / 4 + (if !self.hlen.is_multiple_of(4) { 1 } else { 0 })),
+            )?
             .byte(self.tos)?
             .push(&u16::to_be_bytes(self.len))?
             .push(&u16::to_be_bytes(self.id))?

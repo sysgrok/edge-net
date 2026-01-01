@@ -12,10 +12,10 @@ on:
         - edge-nal-std
         - edge-nal-embassy
         - edge-captive
+        - edge-raw
         - edge-dhcp
         - edge-http
         - edge-mdns
-        - edge-raw
         - edge-ws
 
 env:

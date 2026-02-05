@@ -96,7 +96,7 @@ where
                 info!("Got {header}, with payload {payload:?}");
             }
             _ => {
-                bail!("Unexpected {}", header);
+                bail!("Unexpected {header}");
             }
         }
 

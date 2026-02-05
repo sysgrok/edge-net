@@ -2,7 +2,7 @@
 name = "edge-nal-std"
 version = "0.6.0"
 edition = "2021"
-rust-version = "1.87"
+rust-version = "1.88"
 description = "A STD implementation of edge-nal based on `async-io`"
 repository = "https://github.com/ivmarkov/edge-net"
 readme = "README.md"

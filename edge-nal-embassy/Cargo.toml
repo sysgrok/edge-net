@@ -2,7 +2,7 @@
 name = "edge-nal-embassy"
 version = "0.8.1"
 edition = "2021"
-rust-version = "1.87"
+rust-version = "1.88"
 description = "An implementation of edge-nal based on `embassy-net`"
 repository = "https://github.com/ivmarkov/edge-net"
 readme = "README.md"

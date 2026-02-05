@@ -2,7 +2,7 @@
 name = "edge-captive"
 version = "0.7.0"
 edition = "2021"
-rust-version = "1.87"
+rust-version = "1.88"
 description = "Async + `no_std` + no-alloc implementation of a Captive Portal DNS"
 repository = "https://github.com/ivmarkov/edge-net"
 readme = "README.md"

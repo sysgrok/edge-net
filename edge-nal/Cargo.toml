@@ -2,7 +2,7 @@
 name = "edge-nal"
 version = "0.6.0"
 edition = "2021"
-rust-version = "1.87"
+rust-version = "1.88"
 description = "Hosts a bunch of traits which are not yet available in the embedded-nal-async crate"
 repository = "https://github.com/ivmarkov/edge-net"
 readme = "README.md"

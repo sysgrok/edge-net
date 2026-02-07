@@ -13,6 +13,8 @@ use embassy_net::{IpAddress, IpEndpoint, IpListenEndpoint};
 
 #[cfg(feature = "dns")]
 pub use dns::*;
+#[cfg(feature = "raw")]
+pub use raw::*;
 #[cfg(feature = "tcp")]
 pub use tcp::*;
 #[cfg(feature = "udp")]
@@ -25,6 +27,8 @@ pub(crate) mod fmt;
 
 #[cfg(feature = "dns")]
 mod dns;
+#[cfg(feature = "raw")]
+mod raw;
 #[cfg(feature = "tcp")]
 mod tcp;
 #[cfg(feature = "udp")]

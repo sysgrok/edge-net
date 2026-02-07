@@ -18,4 +18,4 @@ All traits.
 
 ### Raw sockets
 
-Not implemented yet, as `embassy-net` does not expose raw sockets
+All traits.

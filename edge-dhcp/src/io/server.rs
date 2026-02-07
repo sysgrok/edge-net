@@ -16,7 +16,7 @@ pub use super::*;
 ///
 /// Note that the UDP socket that the server takes need to be capable of sending and receiving broadcast UDP packets.
 ///
-/// Furthermore, some DHCP clients do send DHCP OFFER packets without the broadcast flag in the DHCP payload being set to true.
+/// Furthermore, some DHCP clients do send DHCP REQUEST packets without the broadcast flag in the DHCP payload being set to true.
 /// To support these clients, the socket needs to also be capable of sending packets with a broadcast IP destination address
 /// - yet - with the destination *MAC* address in the Ethernet frame set to the MAC address of the DHCP client.
 ///

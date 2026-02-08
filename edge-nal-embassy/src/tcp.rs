@@ -365,7 +365,7 @@ impl embedded_io_async::Error for TcpError {
             TcpError::Accept(_) => ErrorKind::Other,
             TcpError::NoBuffers => ErrorKind::OutOfMemory,
             TcpError::UnsupportedProto => ErrorKind::InvalidInput,
-            TcpError::PeerClosed => ErrorKind::ConnectionReset,
+            TcpError::PeerClosed => ErrorKind::ConnectionAborted,
         }
     }
 }

@@ -31,10 +31,21 @@ pub use super::*;
 ///
 /// The UDP socket must be capable of sending and receiving broadcast UDP packets.
 ///
-/// For proper unicast support (when `ciaddr` is set), the socket should be capable of sending packets
-/// to a specific MAC address. When using `RawSocket2Udp`, the MAC address is automatically captured
-/// from received packets and used for replies, ensuring packets are sent to the correct client at the
-/// Ethernet layer.
+/// ## Regular UDP Sockets
+///
+/// The server works with regular UDP sockets (not requiring raw socket or MAC address control).
+/// In this mode:
+/// - Broadcast messages work correctly
+/// - Unicast messages to `ciaddr` work when the client already has an IP configured
+/// - This covers most common DHCP scenarios (DISCOVER/OFFER/REQUEST/ACK)
+///
+/// ## Raw Sockets (Optional, for Full RFC Compliance)
+///
+/// When using `RawSocket2Udp` (raw sockets with MAC address control):
+/// - The MAC address is automatically captured from received packets
+/// - Unicast messages are sent to the specific client MAC at the Ethernet layer
+/// - This provides better behavior in complex network scenarios
+/// - However, raw sockets are not required for basic DHCP server operation
 pub async fn run<T, F, const N: usize>(
     server: &mut dhcp::server::Server<F, N>,
     server_options: &dhcp::server::ServerOptions<'_>,

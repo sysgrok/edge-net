@@ -227,8 +227,8 @@ impl Readable for TcpSocket<'_> {
         // Check if the socket is readable because it's closed (FIN received from peer)
         // rather than because there's data available
         if !self.socket.may_recv() {
-            // Connection has been closed by the peer
-            return Err(TcpError::General(embassy_net::tcp::Error::ConnectionReset));
+            // Peer has closed their send side of the connection (FIN received)
+            return Err(TcpError::PeerClosed);
         }
         
         Ok(())
@@ -320,6 +320,8 @@ pub enum TcpError {
     NoBuffers,
     /// The provided socket address uses an unsupported protocol.
     UnsupportedProto,
+    /// The peer has closed the connection (FIN received).
+    PeerClosed,
 }
 
 impl From<Error> for TcpError {
@@ -348,6 +350,7 @@ impl Display for TcpError {
             TcpError::Accept(e) => write!(f, "TCP accept error: {:?}", e),
             TcpError::NoBuffers => write!(f, "TCP no buffers available"),
             TcpError::UnsupportedProto => write!(f, "TCP unsupported protocol"),
+            TcpError::PeerClosed => write!(f, "TCP peer closed connection"),
         }
     }
 }
@@ -362,6 +365,7 @@ impl embedded_io_async::Error for TcpError {
             TcpError::Accept(_) => ErrorKind::Other,
             TcpError::NoBuffers => ErrorKind::OutOfMemory,
             TcpError::UnsupportedProto => ErrorKind::InvalidInput,
+            TcpError::PeerClosed => ErrorKind::ConnectionReset,
         }
     }
 }

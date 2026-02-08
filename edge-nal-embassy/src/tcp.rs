@@ -233,8 +233,10 @@ impl Readable for TcpSocket<'_> {
         //
         // Evidence from smoltcp 0.12.0 source (src/socket/tcp.rs):
         // - When FIN is received in ESTABLISHED state (line 1853-1858):
+        //   https://github.com/smoltcp-rs/smoltcp/blob/d2d647090d544b1e7c142571da9d55f7280f664b/src/socket/tcp.rs#L1853-L1858
         //   `self.set_state(State::CloseWait)` is called
         // - The `set_state` method (lines 1315-1329) unconditionally calls:
+        //   https://github.com/smoltcp-rs/smoltcp/blob/d2d647090d544b1e7c142571da9d55f7280f664b/src/socket/tcp.rs#L1315-L1329
         //   `self.rx_waker.wake()` with comment "Wake all tasks waiting. Even if we
         //   haven't received/sent data, this is needed because return values of
         //   functions may change depending on the state."
@@ -285,10 +287,12 @@ impl Read for TcpSocketRead<'_> {
 }
 
 impl Readable for TcpSocketRead<'_> {
+    /// Wait until the socket becomes readable.
+    ///
+    /// Note: TcpReader doesn't expose may_recv(), so we cannot detect FIN closure here.
+    /// This means readable() will not return when peer closes with empty buffer.
+    /// Callers using split sockets should handle 0-byte reads (EOF) appropriately.
     async fn readable(&mut self) -> Result<(), Self::Error> {
-        // Note: TcpReader doesn't expose may_recv(), so we cannot detect FIN closure here.
-        // This means readable() will not return when peer closes with empty buffer.
-        // Callers using split sockets should handle 0-byte reads (EOF) appropriately.
         self.0.wait_read_ready().await;
         Ok(())
     }

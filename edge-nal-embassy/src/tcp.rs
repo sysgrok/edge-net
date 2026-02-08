@@ -235,9 +235,9 @@ impl Readable for TcpSocket<'_> {
                 return Poll::Ready(());
             }
 
-            // Check if data is available using the socket's internal poll
-            let wait_ready = core::pin::pin!(self.socket.wait_read_ready());
-            wait_ready.poll(cx)
+            // Check if data is available by polling wait_read_ready future
+            let read_ready_future = core::pin::pin!(self.socket.wait_read_ready());
+            read_ready_future.poll(cx)
         }).await;
 
         Ok(())

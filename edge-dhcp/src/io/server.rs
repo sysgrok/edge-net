@@ -14,14 +14,23 @@ pub use super::*;
 /// Dropping this future is safe in that it won't remove the internal leases' database,
 /// so users are free to drop the future in case they would like to take a snapshot of the leases or inspect them otherwise.
 ///
-/// Note that the UDP socket that the server takes need to be capable of sending and receiving broadcast UDP packets.
+/// # RFC 2131 Compliance
 ///
-/// Furthermore, some DHCP clients do send DHCP REQUEST packets without the broadcast flag in the DHCP payload being set to true.
-/// To support these clients, the socket needs to also be capable of sending packets with a broadcast IP destination address
-/// - yet - with the destination *MAC* address in the Ethernet frame set to the MAC address of the DHCP client.
+/// The server follows RFC 2131 Section 4.1 for determining reply destinations:
+/// - If `giaddr` is non-zero: sends to relay agent at `giaddr` on port 67
+/// - If `giaddr` is zero and `ciaddr` is non-zero: unicasts to `ciaddr` on port 68
+/// - If both are zero and broadcast flag is set: broadcasts to 255.255.255.255 on port 68
+/// - If both are zero and broadcast flag is not set: unicasts to `yiaddr` on port 68
 ///
-/// This is currently only possible with STD's BSD raw sockets' implementation. Unfortunately, `smoltcp` and thus `embassy-net`
-/// do not have an equivalent (yet).
+/// # Socket Requirements
+///
+/// Note that the UDP socket must be capable of sending and receiving broadcast UDP packets.
+///
+/// Furthermore, for the last case (unicast to `yiaddr` when broadcast flag is not set), the socket
+/// needs to be capable of sending packets with a unicast IP destination address (`yiaddr`) yet with
+/// the destination *MAC* address in the Ethernet frame set to the MAC address of the DHCP client.
+/// This is currently only possible with STD's BSD raw sockets' implementation. Unfortunately, `smoltcp`
+/// and thus `embassy-net` do not have an equivalent (yet).
 pub async fn run<T, F, const N: usize>(
     server: &mut dhcp::server::Server<F, N>,
     server_options: &dhcp::server::ServerOptions<'_>,
@@ -52,12 +61,35 @@ where
         let mut opt_buf = Options::buf();
 
         if let Some(reply) = server.handle_request(&mut opt_buf, server_options, &request) {
+            // Determine destination address according to RFC 2131 Section 4.1
             let remote = if let SocketAddr::V4(socket) = remote {
-                if request.broadcast || *socket.ip() == Ipv4Addr::UNSPECIFIED {
-                    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::BROADCAST, socket.port()))
+                let dest_ip = if !request.giaddr.is_unspecified() {
+                    // 1. If giaddr is non-zero, send to relay agent
+                    request.giaddr
+                } else if !request.ciaddr.is_unspecified() {
+                    // 2. If giaddr is zero and ciaddr is non-zero, unicast to ciaddr
+                    request.ciaddr
+                } else if request.broadcast {
+                    // 3. If giaddr and ciaddr are zero and broadcast flag is set, broadcast
+                    Ipv4Addr::BROADCAST
+                } else if !reply.yiaddr.is_unspecified() {
+                    // 4. If giaddr and ciaddr are zero and broadcast flag is not set,
+                    //    unicast to yiaddr (the IP being offered/acknowledged)
+                    reply.yiaddr
                 } else {
-                    remote
-                }
+                    // Fallback: If yiaddr is also unspecified, broadcast
+                    Ipv4Addr::BROADCAST
+                };
+
+                let dest_port = if !request.giaddr.is_unspecified() {
+                    // Send to relay agent on server port (67)
+                    DEFAULT_SERVER_PORT
+                } else {
+                    // Send to client on client port (68)
+                    socket.port()
+                };
+
+                SocketAddr::V4(SocketAddrV4::new(dest_ip, dest_port))
             } else {
                 remote
             };

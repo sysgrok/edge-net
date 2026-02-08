@@ -1,8 +1,9 @@
 use core::fmt::Display;
+use core::future::{poll_fn, Future};
 use core::net::SocketAddr;
 use core::pin::pin;
 use core::ptr::NonNull;
-use core::future::Future;
+use core::task::Poll;
 
 use edge_nal::{Close, Readable, TcpBind, TcpConnect, TcpShutdown, TcpSplit};
 
@@ -226,17 +227,14 @@ impl Readable for TcpSocket<'_> {
         // embassy-net's wait_read_ready() only returns when can_recv() is true (data available),
         // but does not return when the peer closes the connection (FIN received) with empty buffer.
         // We need to also check may_recv() to detect when peer has sent FIN.
-        
-        use core::future::poll_fn;
-        use core::task::Poll;
-        
+
         poll_fn(|cx| {
             // Check if peer has closed the connection (FIN received)
             if !self.socket.may_recv() {
                 // Peer has closed, socket is "readable" (will return EOF on subsequent read)
                 return Poll::Ready(());
             }
-            
+
             // Check if data is available using the socket's internal poll
             // We need to manually poll wait_read_ready since we can't await it here
             let mut wait_ready = core::pin::pin!(self.socket.wait_read_ready());
@@ -245,7 +243,7 @@ impl Readable for TcpSocket<'_> {
                 Poll::Pending => Poll::Pending,
             }
         }).await;
-        
+
         Ok(())
     }
 }

@@ -230,14 +230,18 @@ impl Readable for TcpSocket<'_> {
         //
         // This implementation relies on smoltcp waking the recv waker when the socket state
         // changes such that may_recv() becomes false (i.e., when FIN is received).
-        // This should happen because:
-        // 1. Embassy-net's background task continuously polls the smoltcp interface
-        // 2. When FIN is processed, the socket state changes (e.g., to CLOSE_WAIT)
-        // 3. The socket becomes "readable" (will return EOF on read)
-        // 4. smoltcp wakes registered recv wakers for readable sockets
         //
-        // If the waker is not triggered by FIN (only by data arrival), this fix will not work
-        // and the connection will still timeout. Testing on target hardware is recommended.
+        // Evidence from smoltcp 0.12.0 source (src/socket/tcp.rs):
+        // - When FIN is received in ESTABLISHED state (line 1853-1858):
+        //   `self.set_state(State::CloseWait)` is called
+        // - The `set_state` method (lines 1315-1329) unconditionally calls:
+        //   `self.rx_waker.wake()` with comment "Wake all tasks waiting. Even if we
+        //   haven't received/sent data, this is needed because return values of
+        //   functions may change depending on the state."
+        //
+        // Therefore, when FIN is received, the waker registered by wait_read_ready()
+        // WILL be triggered, causing our poll_fn to be re-polled, at which point
+        // may_recv() will return false and we'll return Ready.
 
         poll_fn(|cx| {
             // Check if peer has closed the connection (FIN received)

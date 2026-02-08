@@ -1,42 +1,40 @@
-//! NOTE: Run this example with `sudo` to be able to bind to the interface, as it uses raw sockets which require root privileges.
+//! DHCP server example using regular UDP sockets.
+//!
+//! This example demonstrates how to run a DHCP server using standard UDP sockets
+//! without requiring raw socket access or root privileges.
+//!
+//! The server will listen on port 67 and respond to DHCP requests from clients.
+//!
+//! # Note
+//! For better RFC 2131 compliance with MAC-level addressing, you can use raw sockets
+//! (requires root privileges). See the dhcp_server_raw example for that approach.
 
-use core::net::{Ipv4Addr, SocketAddrV4};
+use core::net::{Ipv4Addr, SocketAddr};
 
-use edge_dhcp::io::{self, DEFAULT_CLIENT_PORT, DEFAULT_SERVER_PORT};
+use edge_dhcp::io::{self, DEFAULT_SERVER_PORT};
 use edge_dhcp::server::{Server, ServerOptions};
-use edge_nal::RawBind;
-use edge_raw::io::RawSocket2Udp;
+use edge_nal::UdpBind;
 
 fn main() {
     env_logger::init_from_env(
         env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
     );
 
-    futures_lite::future::block_on(run(
-        0, // The interface index of the interface (e.g. eno0) to use; run `ip addr` to see it
-    ))
-    .unwrap();
+    futures_lite::future::block_on(run()).unwrap();
 }
 
-async fn run(if_index: u32) -> Result<(), anyhow::Error> {
-    let stack = edge_nal_std::Interface::new(if_index);
+async fn run() -> Result<(), anyhow::Error> {
+    let stack = edge_nal_std::Stack::new();
 
     let mut buf = [0; 1500];
 
     let ip = Ipv4Addr::new(192, 168, 0, 1);
 
-    let mut socket: RawSocket2Udp<_> = RawSocket2Udp::new(
-        stack.bind().await?,
-        Some(SocketAddrV4::new(
-            Ipv4Addr::UNSPECIFIED,
-            DEFAULT_SERVER_PORT,
-        )),
-        Some(SocketAddrV4::new(
-            Ipv4Addr::UNSPECIFIED,
-            DEFAULT_CLIENT_PORT,
-        )),
-        [0; 6],
-    );
+    // Bind to the DHCP server port (67) on all interfaces
+    // The socket will have broadcast enabled automatically
+    let mut socket = stack
+        .bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, DEFAULT_SERVER_PORT)))
+        .await?;
 
     let mut gw_buf = [Ipv4Addr::UNSPECIFIED];
 

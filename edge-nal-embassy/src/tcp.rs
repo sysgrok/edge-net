@@ -223,6 +223,14 @@ impl Write for TcpSocket<'_> {
 impl Readable for TcpSocket<'_> {
     async fn readable(&mut self) -> Result<(), Self::Error> {
         self.socket.wait_read_ready().await;
+        
+        // Check if the socket is readable because it's closed (FIN received from peer)
+        // rather than because there's data available
+        if !self.socket.may_recv() {
+            // Connection has been closed by the peer
+            return Err(TcpError::General(embassy_net::tcp::Error::ConnectionReset));
+        }
+        
         Ok(())
     }
 }
@@ -254,6 +262,10 @@ impl Read for TcpSocketRead<'_> {
 impl Readable for TcpSocketRead<'_> {
     async fn readable(&mut self) -> Result<(), Self::Error> {
         self.0.wait_read_ready().await;
+        // Note: Unlike TcpSocket, we cannot check may_recv() here because TcpReader
+        // doesn't expose this method. This means that if the peer closes the connection,
+        // readable() will return Ok() and the subsequent read() will return 0 bytes (EOF).
+        // Callers should handle the EOF case appropriately.
         Ok(())
     }
 }

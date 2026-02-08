@@ -236,12 +236,8 @@ impl Readable for TcpSocket<'_> {
             }
 
             // Check if data is available using the socket's internal poll
-            // We need to manually poll wait_read_ready since we can't await it here
-            let mut wait_ready = core::pin::pin!(self.socket.wait_read_ready());
-            match wait_ready.as_mut().poll(cx) {
-                Poll::Ready(()) => Poll::Ready(()),
-                Poll::Pending => Poll::Pending,
-            }
+            let wait_ready = core::pin::pin!(self.socket.wait_read_ready());
+            wait_ready.poll(cx)
         }).await;
 
         Ok(())

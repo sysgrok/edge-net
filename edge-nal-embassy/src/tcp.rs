@@ -223,14 +223,14 @@ impl Write for TcpSocket<'_> {
 impl Readable for TcpSocket<'_> {
     async fn readable(&mut self) -> Result<(), Self::Error> {
         self.socket.wait_read_ready().await;
-        
+
         // Check if the socket is readable because it's closed (FIN received from peer)
         // rather than because there's data available
         if !self.socket.may_recv() {
             // Peer has closed their send side of the connection (FIN received)
             return Err(TcpError::PeerClosed);
         }
-        
+
         Ok(())
     }
 }
@@ -365,6 +365,9 @@ impl embedded_io_async::Error for TcpError {
             TcpError::Accept(_) => ErrorKind::Other,
             TcpError::NoBuffers => ErrorKind::OutOfMemory,
             TcpError::UnsupportedProto => ErrorKind::InvalidInput,
+            // Map PeerClosed to ConnectionAborted as it's the closest semantic match
+            // in embedded-io's limited ErrorKind enum for a peer that has gracefully
+            // closed their side of the connection (FIN received)
             TcpError::PeerClosed => ErrorKind::ConnectionAborted,
         }
     }

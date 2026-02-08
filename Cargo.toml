@@ -56,6 +56,10 @@ name = "dhcp_server"
 required-features = ["std"]
 
 [[example]]
+name = "dhcp_server_raw"
+required-features = ["std"]
+
+[[example]]
 name = "http_client"
 required-features = ["std"]
 

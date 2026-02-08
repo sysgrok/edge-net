@@ -33,7 +33,10 @@ async fn run() -> Result<(), anyhow::Error> {
     // Bind to the DHCP server port (67) on all interfaces
     // The socket will have broadcast enabled automatically
     let mut socket = stack
-        .bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, DEFAULT_SERVER_PORT)))
+        .bind(SocketAddr::from((
+            Ipv4Addr::UNSPECIFIED,
+            DEFAULT_SERVER_PORT,
+        )))
         .await?;
 
     let mut gw_buf = [Ipv4Addr::UNSPECIFIED];

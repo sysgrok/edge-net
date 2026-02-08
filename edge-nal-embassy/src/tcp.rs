@@ -2,6 +2,7 @@ use core::fmt::Display;
 use core::net::SocketAddr;
 use core::pin::pin;
 use core::ptr::NonNull;
+use core::future::Future;
 
 use edge_nal::{Close, Readable, TcpBind, TcpConnect, TcpShutdown, TcpSplit};
 
@@ -222,15 +223,29 @@ impl Write for TcpSocket<'_> {
 
 impl Readable for TcpSocket<'_> {
     async fn readable(&mut self) -> Result<(), Self::Error> {
-        self.socket.wait_read_ready().await;
-
-        // Check if the socket is readable because it's closed (FIN received from peer)
-        // rather than because there's data available
-        if !self.socket.may_recv() {
-            // Peer has closed their send side of the connection (FIN received)
-            return Err(TcpError::PeerClosed);
-        }
-
+        // embassy-net's wait_read_ready() only returns when can_recv() is true (data available),
+        // but does not return when the peer closes the connection (FIN received) with empty buffer.
+        // We need to also check may_recv() to detect when peer has sent FIN.
+        
+        use core::future::poll_fn;
+        use core::task::Poll;
+        
+        poll_fn(|cx| {
+            // Check if peer has closed the connection (FIN received)
+            if !self.socket.may_recv() {
+                // Peer has closed, socket is "readable" (will return EOF on subsequent read)
+                return Poll::Ready(());
+            }
+            
+            // Check if data is available using the socket's internal poll
+            // We need to manually poll wait_read_ready since we can't await it here
+            let mut wait_ready = core::pin::pin!(self.socket.wait_read_ready());
+            match wait_ready.as_mut().poll(cx) {
+                Poll::Ready(()) => Poll::Ready(()),
+                Poll::Pending => Poll::Pending,
+            }
+        }).await;
+        
         Ok(())
     }
 }
@@ -261,11 +276,10 @@ impl Read for TcpSocketRead<'_> {
 
 impl Readable for TcpSocketRead<'_> {
     async fn readable(&mut self) -> Result<(), Self::Error> {
+        // Note: TcpReader doesn't expose may_recv(), so we cannot detect FIN closure here.
+        // This means readable() will not return when peer closes with empty buffer.
+        // Callers using split sockets should handle 0-byte reads (EOF) appropriately.
         self.0.wait_read_ready().await;
-        // Note: Unlike TcpSocket, we cannot check may_recv() here because TcpReader
-        // doesn't expose this method. This means that if the peer closes the connection,
-        // readable() will return Ok() and the subsequent read() will return 0 bytes (EOF).
-        // Callers should handle the EOF case appropriately.
         Ok(())
     }
 }
@@ -320,8 +334,6 @@ pub enum TcpError {
     NoBuffers,
     /// The provided socket address uses an unsupported protocol.
     UnsupportedProto,
-    /// The peer has closed the connection (FIN received).
-    PeerClosed,
 }
 
 impl From<Error> for TcpError {
@@ -350,7 +362,6 @@ impl Display for TcpError {
             TcpError::Accept(e) => write!(f, "TCP accept error: {:?}", e),
             TcpError::NoBuffers => write!(f, "TCP no buffers available"),
             TcpError::UnsupportedProto => write!(f, "TCP unsupported protocol"),
-            TcpError::PeerClosed => write!(f, "TCP peer closed connection"),
         }
     }
 }
@@ -365,10 +376,6 @@ impl embedded_io_async::Error for TcpError {
             TcpError::Accept(_) => ErrorKind::Other,
             TcpError::NoBuffers => ErrorKind::OutOfMemory,
             TcpError::UnsupportedProto => ErrorKind::InvalidInput,
-            // Map PeerClosed to ConnectionAborted as it's the closest semantic match
-            // in embedded-io's limited ErrorKind enum for a peer that has gracefully
-            // closed their side of the connection (FIN received)
-            TcpError::PeerClosed => ErrorKind::ConnectionAborted,
         }
     }
 }

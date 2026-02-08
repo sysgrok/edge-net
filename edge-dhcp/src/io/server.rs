@@ -62,7 +62,7 @@ where
 
         if let Some(reply) = server.handle_request(&mut opt_buf, server_options, &request) {
             // Determine destination address according to RFC 2131 Section 4.1
-            let remote = if let SocketAddr::V4(socket) = remote {
+            let remote = if matches!(remote, SocketAddr::V4(_)) {
                 let dest_ip = if !request.giaddr.is_unspecified() {
                     // 1. If giaddr is non-zero, send to relay agent
                     request.giaddr
@@ -77,7 +77,10 @@ where
                     //    unicast to yiaddr (the IP being offered/acknowledged)
                     reply.yiaddr
                 } else {
-                    // Fallback: If yiaddr is also unspecified, broadcast
+                    // Fallback: If yiaddr is also unspecified, broadcast.
+                    // This case is not explicitly covered by RFC 2131 Section 4.1 but can occur
+                    // with malformed packets, DHCPNAK responses, or server implementation issues.
+                    // Broadcasting ensures the client has the best chance of receiving the response.
                     Ipv4Addr::BROADCAST
                 };
 
@@ -85,8 +88,8 @@ where
                     // Send to relay agent on server port (67)
                     DEFAULT_SERVER_PORT
                 } else {
-                    // Send to client on client port (68)
-                    socket.port()
+                    // Send to client on client port (68) per RFC 2131 Section 4.1
+                    DEFAULT_CLIENT_PORT
                 };
 
                 SocketAddr::V4(SocketAddrV4::new(dest_ip, dest_port))

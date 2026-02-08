@@ -253,7 +253,8 @@ impl Readable for TcpSocket<'_> {
             // Check if data is available by polling wait_read_ready future
             let read_ready_future = core::pin::pin!(self.socket.wait_read_ready());
             read_ready_future.poll(cx)
-        }).await;
+        })
+        .await;
 
         Ok(())
     }

@@ -72,8 +72,9 @@ where
                     // 1. If giaddr is non-zero, send to relay agent
                     request.giaddr
                 } else if !request.ciaddr.is_unspecified() && !request.broadcast {
-                    // 2. If giaddr is zero and ciaddr is non-zero and broadcast flag is not set,
-                    //    unicast to ciaddr
+                    // 2. Unicast to ciaddr only if BOTH conditions are met:
+                    //    - giaddr is zero AND ciaddr is non-zero (client has existing IP)
+                    //    - AND broadcast flag is not set
                     // NOTE: We do NOT unicast to yiaddr! The client may not have a UDP socket
                     // listening on yiaddr yet. Only ciaddr (from the client's request) is safe.
                     request.ciaddr

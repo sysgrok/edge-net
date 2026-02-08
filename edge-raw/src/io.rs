@@ -73,9 +73,14 @@ impl<E> core::error::Error for Error<E> where E: core::error::Error {}
 /// It also allows DHCP servers to send packets to specific clients which don't yet have an IP address, and are
 /// thus only addressable either by broadcasting, or by their MAC address.
 ///
+/// # MAC Address Handling
+///
 /// When receiving packets, the MAC address of the sender is automatically stored and used for subsequent
 /// sends, unless explicitly overridden with `set_remote_mac()`. This is particularly useful for DHCP servers
 /// that need to respond to different clients.
+///
+/// When sending to a broadcast IP address (255.255.255.255), the broadcast MAC address (ff:ff:ff:ff:ff:ff)
+/// is automatically used regardless of the stored MAC address, ensuring proper broadcast behavior.
 pub struct RawSocket2Udp<T, const N: usize = 1500> {
     socket: T,
     filter_local: Option<SocketAddrV4>,
@@ -153,6 +158,13 @@ where
             SocketAddr::V6(_) => Err(Error::UnsupportedProtocol)?,
         };
 
+        // Use broadcast MAC address when sending to broadcast IP
+        let dest_mac = if *remote.ip() == Ipv4Addr::BROADCAST {
+            [0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+        } else {
+            self.remote_mac
+        };
+
         udp_send::<_, N>(
             &mut self.socket,
             SocketAddr::V4(
@@ -160,7 +172,7 @@ where
                     .unwrap_or(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)),
             ),
             SocketAddr::V4(remote),
-            self.remote_mac,
+            dest_mac,
             data,
         )
         .await

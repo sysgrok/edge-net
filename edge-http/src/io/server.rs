@@ -815,14 +815,15 @@ impl<const P: usize, const B: usize, const N: usize> Default for Server<P, B, N>
 /// - `Q` acceptor tasks each wait for a signal before calling `accept()`
 /// - Each acceptor has its own signal that indicates a socket is available
 /// - Initially, all Q signals are set, allowing Q concurrent accepts
-/// - When an acceptor accepts a connection, it enqueues the socket to a channel
+/// - When an acceptor accepts a connection, it enqueues the socket along with its ID to a channel
 /// - `P` worker tasks dequeue sockets from the channel and process HTTP requests
-/// - When a worker finishes, it signals one of the acceptor tasks (round-robin) to accept again
+/// - When a worker finishes, it signals the specific acceptor that provided the socket
 /// - This ensures at most `Q` sockets are allocated at any time (some accepting, some processing)
 ///
 /// The signal-based mechanism prevents the socket pool exhaustion that would occur if all Q acceptor
 /// tasks were simultaneously calling `accept()` while P workers were busy processing, which would
-/// require Q+P sockets total.
+/// require Q+P sockets total. By tracking which acceptor provided each socket, workers can signal
+/// the correct acceptor (one that's waiting on its signal, not busy on `accept()`).
 ///
 /// # Threading Safety
 ///
@@ -874,10 +875,11 @@ where
     use embassy_sync::signal::Signal;
 
     // Create a channel to pass accepted sockets from acceptor tasks to worker tasks
+    // Each message contains the socket and the ID of the acceptor that accepted it
     // NoopRawMutex is appropriate for single-threaded async executors (e.g., embassy-executor).
     // WARNING: For multi-threaded executors, use a different mutex implementation such as
     // CriticalSectionRawMutex or ThreadModeRawMutex to avoid race conditions.
-    let socket_queue = Channel::<NoopRawMutex, _, Q>::new();
+    let socket_queue = Channel::<NoopRawMutex, (A::Socket<'_>, usize), Q>::new();
 
     // Create signals for each acceptor task to coordinate socket availability
     // When a worker finishes processing a socket, it signals an acceptor to accept a new connection
@@ -904,7 +906,6 @@ where
                     // Wait for signal that a socket is available
                     // Initially all signals are ready, allowing Q concurrent accepts
                     signal.wait().await;
-                    signal.reset();
 
                     debug!(
                         "Acceptor task {}: Got signal, waiting for connection",
@@ -918,8 +919,9 @@ where
                                 display2format!(acceptor_id)
                             );
 
-                            // Send the socket to the queue for workers to process
-                            socket_queue.send(io).await;
+                            // Send the socket along with the acceptor ID to the queue
+                            // This allows workers to signal the correct acceptor when done
+                            socket_queue.send((io, acceptor_id)).await;
 
                             debug!(
                                 "Acceptor task {}: Connection enqueued",
@@ -967,12 +969,13 @@ where
                         display2format!(task_id)
                     );
 
-                    // Receive an accepted socket from the queue
-                    let io = socket_queue.receive().await;
+                    // Receive an accepted socket from the queue along with the acceptor ID
+                    let (io, acceptor_id) = socket_queue.receive().await;
 
                     debug!(
-                        "Worker task {}: Got connection from queue",
-                        display2format!(task_id)
+                        "Worker task {}: Got connection from acceptor {} from queue",
+                        display2format!(task_id),
+                        display2format!(acceptor_id)
                     );
 
                     handle_connection::<_, _, N>(
@@ -984,15 +987,15 @@ where
                     )
                     .await;
 
-                    // Signal an acceptor task that a socket is now available
-                    // Use round-robin to distribute work across acceptors
-                    let signal_idx = task_id % Q;
+                    // Signal the specific acceptor that provided this socket
+                    // This ensures we signal an acceptor that's waiting on its signal,
+                    // not one that might be busy waiting on accept()
                     debug!(
                         "Worker task {}: Finished processing, signaling acceptor {}",
                         display2format!(task_id),
-                        display2format!(signal_idx)
+                        display2format!(acceptor_id)
                     );
-                    accept_signals[signal_idx].signal(());
+                    accept_signals[acceptor_id].signal(());
                 }
             })
             .map_err(|_| ()));

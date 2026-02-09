@@ -808,19 +808,21 @@ impl<const P: usize, const B: usize, const N: usize> Default for Server<P, B, N>
 /// Run the server with a socket queue architecture that decouples socket acceptance from HTTP processing.
 ///
 /// This function addresses the limitation of TCP stacks without accept queues (e.g., smoltcp/embassy-net)
-/// by maintaining multiple acceptor tasks that continuously call `accept()`. This ensures that there are
-/// always `Q` sockets in the smoltcp socket set ready to accept incoming connections, even when HTTP
-/// worker tasks are busy processing requests.
+/// by using a signal-based coordination mechanism between acceptor and worker tasks. This ensures that
+/// the number of sockets in use never exceeds the available socket pool size, preventing resource exhaustion.
 ///
 /// Architecture:
-/// - `Q` acceptor tasks continuously accept incoming connections and enqueue them to a channel
-/// - `P` worker tasks dequeue accepted connections from the channel and process HTTP requests
-/// - Each acceptor task holds one socket in the "accepting" state in smoltcp's socket set
-/// - When multiple connections arrive simultaneously, they can all be accepted (up to Q connections)
-/// - The channel size is `Q`, matching the number of acceptor tasks
+/// - `Q` acceptor tasks each wait for a signal before calling `accept()`
+/// - Each acceptor has its own signal that indicates a socket is available
+/// - Initially, all Q signals are set, allowing Q concurrent accepts
+/// - When an acceptor accepts a connection, it enqueues the socket to a channel
+/// - `P` worker tasks dequeue sockets from the channel and process HTTP requests
+/// - When a worker finishes, it signals one of the acceptor tasks (round-robin) to accept again
+/// - This ensures at most `Q` sockets are allocated at any time (some accepting, some processing)
 ///
-/// This architecture solves the problem where a single acceptor task would only have one socket
-/// waiting in smoltcp, causing subsequent simultaneous connection attempts to be rejected.
+/// The signal-based mechanism prevents the socket pool exhaustion that would occur if all Q acceptor
+/// tasks were simultaneously calling `accept()` while P workers were busy processing, which would
+/// require Q+P sockets total.
 ///
 /// # Threading Safety
 ///
@@ -869,6 +871,7 @@ where
 {
     use embassy_sync::blocking_mutex::raw::NoopRawMutex;
     use embassy_sync::channel::Channel;
+    use embassy_sync::signal::Signal;
 
     // Create a channel to pass accepted sockets from acceptor tasks to worker tasks
     // NoopRawMutex is appropriate for single-threaded async executors (e.g., embassy-executor).
@@ -876,9 +879,13 @@ where
     // CriticalSectionRawMutex or ThreadModeRawMutex to avoid race conditions.
     let socket_queue = Channel::<NoopRawMutex, _, Q>::new();
 
-    // Create Q acceptor tasks - each continuously accepts connections and enqueues them
-    // This ensures Q sockets are always in the "accepting" state in smoltcp's socket set,
-    // allowing multiple simultaneous connections to be accepted
+    // Create signals for each acceptor task to coordinate socket availability
+    // When a worker finishes processing a socket, it signals an acceptor to accept a new connection
+    // This ensures we never have more sockets in use than available in the pool
+    let accept_signals: [Signal<NoopRawMutex, ()>; Q] = [(); Q].map(|_| Signal::new());
+
+    // Create Q acceptor tasks - each waits for its signal before accepting
+    // This ensures we never have more than (Q - sockets_in_use) acceptors calling accept()
     let mut acceptor_tasks = heapless::Vec::<_, Q>::new();
 
     info!(
@@ -889,12 +896,18 @@ where
     for acceptor_id in 0..Q {
         let acceptor = &acceptor;
         let socket_queue = &socket_queue;
+        let signal = &accept_signals[acceptor_id];
 
         unwrap!(acceptor_tasks
             .push(async move {
                 loop {
+                    // Wait for signal that a socket is available
+                    // Initially all signals are ready, allowing Q concurrent accepts
+                    signal.wait().await;
+                    signal.reset();
+
                     debug!(
-                        "Acceptor task {}: Waiting for connection",
+                        "Acceptor task {}: Got signal, waiting for connection",
                         display2format!(acceptor_id)
                     );
 
@@ -919,12 +932,18 @@ where
                                 display2format!(acceptor_id),
                                 debug2format!(e)
                             );
-                            // Continue accepting despite errors
+                            // Signal ourselves again to retry
+                            signal.signal(());
                         }
                     }
                 }
             })
             .map_err(|_| ()));
+    }
+
+    // Initially signal all acceptors to start accepting
+    for signal in &accept_signals {
+        signal.signal(());
     }
 
     // Create worker tasks
@@ -934,6 +953,7 @@ where
         let task_id = index;
         let handler = &handler;
         let socket_queue = &socket_queue;
+        let accept_signals = &accept_signals;
         // Safety: The server buffer array is properly initialized (MaybeUninit is used correctly),
         // and each worker task gets exclusive access to its own buffer slice via its unique index.
         // The pointer remains valid for the lifetime of the server and the buffer is not moved.
@@ -963,6 +983,16 @@ where
                         handler,
                     )
                     .await;
+
+                    // Signal an acceptor task that a socket is now available
+                    // Use round-robin to distribute work across acceptors
+                    let signal_idx = task_id % Q;
+                    debug!(
+                        "Worker task {}: Finished processing, signaling acceptor {}",
+                        display2format!(task_id),
+                        display2format!(signal_idx)
+                    );
+                    accept_signals[signal_idx].signal(());
                 }
             })
             .map_err(|_| ()));

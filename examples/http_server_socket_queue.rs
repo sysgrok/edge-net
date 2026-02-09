@@ -31,8 +31,9 @@ pub async fn run(server: &mut DefaultServer) -> Result<(), anyhow::Error> {
         .await?;
 
     // Use the new socket queue architecture for better connection handling
+    // Q=8: Number of sockets that can be allocated (acceptor + worker tasks)
     server
-        .run_with_socket_queue(None, acceptor, HttpHandler)
+        .run_with_socket_queue::<_, _, 8>(None, acceptor, HttpHandler)
         .await?;
 
     Ok(())

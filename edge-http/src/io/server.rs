@@ -15,7 +15,6 @@ use crate::{ConnectionType, DEFAULT_MAX_HEADERS_COUNT};
 
 pub const DEFAULT_HANDLER_TASKS_COUNT: usize = 4;
 pub const DEFAULT_BUF_SIZE: usize = 2048;
-pub const DEFAULT_SOCKET_QUEUE_SIZE: usize = 8;
 
 const COMPLETION_BUF_SIZE: usize = 64;
 
@@ -764,22 +763,38 @@ impl<const P: usize, const B: usize, const N: usize> Server<P, B, N> {
 
     /// Run the server with a socket queue architecture (recommended for smoltcp/embassy-net)
     ///
-    /// This method uses the socket queue architecture with a default queue size of `DEFAULT_SOCKET_QUEUE_SIZE`.
-    /// The socket queue decouples connection acceptance from HTTP processing, allowing the server to
-    /// accept incoming connections even when all worker tasks are busy processing requests.
+    /// This method addresses the limitation of TCP stacks without accept queues (e.g., smoltcp/embassy-net)
+    /// by using a signal-based coordination mechanism between acceptor and worker tasks. This ensures that
+    /// the number of sockets in use never exceeds the available socket pool size, preventing resource exhaustion.
     ///
-    /// For TCP stacks without accept queues (e.g., smoltcp/embassy-net), this architecture provides
-    /// better connection handling by maintaining a pool of accepted sockets waiting to be processed.
+    /// # Type Parameters
     ///
-    /// Parameters:
-    /// - `keepalive_timeout_ms`: An optional timeout in milliseconds for detecting an idle keepalive
-    ///   connection that should be closed. If not provided, the function will not close idle connections
+    /// - `Q`: Number of acceptor tasks and maximum sockets that can be allocated simultaneously (default: 8)
+    ///
+    /// # Important Constraints
+    ///
+    /// **CRITICAL**: The `Q` parameter must satisfy these constraints or the function will panic:
+    /// - `Q` must be **less than or equal to** the number of sockets in your smoltcp/embassy-net socket pool
+    ///   - If `Q` exceeds the socket pool size, accept() calls will fail and cause panics
+    /// - `Q` should be **greater than or equal to** `P` for the architecture to provide benefits
+    ///   - If `Q < P`, you lose the advantage of decoupling acceptance from processing
+    ///   - Recommended: `Q >= P` (e.g., Q=8 with P=4)
+    ///
+    /// # Timeout Configuration
+    ///
+    /// The function does NOT establish timeouts by default (except optional keepalive timeout):
+    /// - Wrap the acceptor with `edge_nal::WithTimeout` to set socket-level timeouts
+    /// - Wrap handler logic with `edge_nal::with_timeout` for request-response timeouts
+    ///
+    /// # Parameters
+    ///
+    /// - `keepalive_timeout_ms`: Optional timeout in milliseconds for idle keepalive connections
     /// - `acceptor`: An implementation of `edge_nal::TcpAccept` to accept incoming connections
     /// - `handler`: An implementation of `Handler` to handle incoming requests
     #[cfg(feature = "io")]
     #[inline(never)]
     #[cold]
-    pub async fn run_with_socket_queue<A, H>(
+    pub async fn run_with_socket_queue<A, H, const Q: usize>(
         &mut self,
         keepalive_timeout_ms: Option<u32>,
         acceptor: A,
@@ -789,264 +804,205 @@ impl<const P: usize, const B: usize, const N: usize> Server<P, B, N> {
         A: edge_nal::TcpAccept,
         H: Handler,
     {
-        run_with_socket_queue::<_, _, P, { DEFAULT_SOCKET_QUEUE_SIZE }, B, N>(
-            self,
-            keepalive_timeout_ms,
-            acceptor,
-            handler,
+        use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+        use embassy_sync::channel::Channel;
+        use embassy_sync::signal::Signal;
+
+        // ============================================================================
+        // Internal Architecture
+        // ============================================================================
+        // This implementation uses a signal-based coordination mechanism:
+        //
+        // - Q acceptor tasks: Each waits for a signal before calling accept()
+        // - Each acceptor has its own signal indicating socket availability
+        // - Initially all Q signals are set, allowing Q concurrent accepts
+        // - When an acceptor accepts a connection, it enqueues (socket, acceptor_id)
+        // - P worker tasks dequeue from channel and process HTTP requests
+        // - When a worker finishes, it signals the specific acceptor that provided the socket
+        // - At most Q sockets allocated at any time (some accepting, some processing)
+        //
+        // This prevents socket pool exhaustion that would occur if all Q acceptors
+        // were simultaneously calling accept() while P workers were processing,
+        // which would require Q+P sockets. By tracking which acceptor provided each
+        // socket, workers signal the correct acceptor (one waiting on its signal,
+        // not busy on accept()).
+        //
+        // Threading: Uses NoopRawMutex for single-threaded executors (embassy-executor).
+        // For multi-threaded executors, a different mutex type would be needed.
+        // ============================================================================
+
+        // Create a channel to pass accepted sockets from acceptor tasks to worker tasks
+        // Each message contains the socket and the ID of the acceptor that accepted it
+        let socket_queue = Channel::<NoopRawMutex, (A::Socket<'_>, usize), Q>::new();
+
+        // Create signals for each acceptor task to coordinate socket availability
+        // When a worker finishes processing a socket, it signals an acceptor to accept a new connection
+        // This ensures we never have more sockets in use than available in the pool
+        let accept_signals: [Signal<NoopRawMutex, ()>; Q] = [(); Q].map(|_| Signal::new());
+
+        // Create Q acceptor tasks - each waits for its signal before accepting
+        // This ensures we never have more than (Q - sockets_in_use) acceptors calling accept()
+        let mut acceptor_tasks = heapless::Vec::<_, Q>::new();
+
+        info!(
+            "Creating {} acceptor tasks and {} worker tasks, queue size: {}",
+            Q, P, Q
+        );
+
+        for acceptor_id in 0..Q {
+            let acceptor = &acceptor;
+            let socket_queue = &socket_queue;
+            let signal = &accept_signals[acceptor_id];
+
+            unwrap!(acceptor_tasks
+                .push(async move {
+                    loop {
+                        // Wait for signal that a socket is available
+                        // Initially all signals are ready, allowing Q concurrent accepts
+                        signal.wait().await;
+
+                        debug!(
+                            "Acceptor task {}: Got signal, waiting for connection",
+                            display2format!(acceptor_id)
+                        );
+
+                        match acceptor.accept().await {
+                            Ok((_, io)) => {
+                                debug!(
+                                    "Acceptor task {}: Got connection, enqueueing",
+                                    display2format!(acceptor_id)
+                                );
+
+                                // Send the socket along with the acceptor ID to the queue
+                                // This allows workers to signal the correct acceptor when done
+                                socket_queue.send((io, acceptor_id)).await;
+
+                                debug!(
+                                    "Acceptor task {}: Connection enqueued",
+                                    display2format!(acceptor_id)
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "Acceptor task {}: Error accepting connection: {:?}",
+                                    display2format!(acceptor_id),
+                                    debug2format!(e)
+                                );
+                                // Signal ourselves again to retry
+                                signal.signal(());
+                            }
+                        }
+                    }
+                })
+                .map_err(|_| ()));
+        }
+
+        // Initially signal all acceptors to start accepting
+        for signal in &accept_signals {
+            signal.signal(());
+        }
+
+        // Create worker tasks
+        let mut worker_tasks = heapless::Vec::<_, P>::new();
+
+        for index in 0..P {
+            let task_id = index;
+            let handler = &handler;
+            let socket_queue = &socket_queue;
+            let accept_signals = &accept_signals;
+            // Safety: The server buffer array is properly initialized (MaybeUninit is used correctly),
+            // and each worker task gets exclusive access to its own buffer slice via its unique index.
+            // The pointer remains valid for the lifetime of the server and the buffer is not moved.
+            let buf: *mut [u8; B] = &mut unsafe { self.0.assume_init_mut() }[index];
+
+            unwrap!(worker_tasks
+                .push(async move {
+                    loop {
+                        debug!(
+                            "Worker task {}: Waiting for connection from queue",
+                            display2format!(task_id)
+                        );
+
+                        // Receive an accepted socket from the queue along with the acceptor ID
+                        let (io, acceptor_id) = socket_queue.receive().await;
+
+                        debug!(
+                            "Worker task {}: Got connection from acceptor {} from queue",
+                            display2format!(task_id),
+                            display2format!(acceptor_id)
+                        );
+
+                        handle_connection::<_, _, N>(
+                            io,
+                            unwrap!(unsafe { buf.as_mut() }),
+                            keepalive_timeout_ms,
+                            task_id,
+                            handler,
+                        )
+                        .await;
+
+                        // Signal the specific acceptor that provided this socket
+                        // This ensures we signal an acceptor that's waiting on its signal,
+                        // not one that might be busy waiting on accept()
+                        debug!(
+                            "Worker task {}: Finished processing, signaling acceptor {}",
+                            display2format!(task_id),
+                            display2format!(acceptor_id)
+                        );
+                        accept_signals[acceptor_id].signal(());
+                    }
+                })
+                .map_err(|_| ()));
+        }
+
+        // Pin tasks for select_slice
+        let acceptor_tasks = pin!(acceptor_tasks);
+        let acceptor_tasks = unsafe { acceptor_tasks.map_unchecked_mut(|t| t.as_mut_slice()) };
+
+        let worker_tasks = pin!(worker_tasks);
+        let worker_tasks = unsafe { worker_tasks.map_unchecked_mut(|t| t.as_mut_slice()) };
+
+        // Run all acceptor and worker tasks concurrently
+        // Use select to run both acceptors and workers, return if any completes
+        use embassy_futures::select::Either;
+        let result = embassy_futures::select::select(
+            async {
+                let (result, _acceptor_index): (Result<(), Error<A::Error>>, _) =
+                    embassy_futures::select::select_slice(acceptor_tasks).await;
+                result
+            },
+            async {
+                let (result, _worker_index): (Result<(), Error<A::Error>>, _) =
+                    embassy_futures::select::select_slice(worker_tasks).await;
+                result
+            },
         )
-        .await
+        .await;
+
+        // Neither acceptor nor worker tasks should complete normally
+        match result {
+            Either::First(Err(e)) => {
+                warn!("Acceptor task quit with error: {:?}", debug2format!(e));
+                Err(e)
+            }
+            Either::First(Ok(_)) => {
+                warn!("Acceptor task quit unexpectedly");
+                Ok(())
+            }
+            Either::Second(Err(e)) => {
+                warn!("Worker task quit with error: {:?}", debug2format!(e));
+                Err(e)
+            }
+            Either::Second(Ok(_)) => {
+                warn!("Worker task quit unexpectedly");
+                Ok(())
+            }
+        }
     }
 }
 
 impl<const P: usize, const B: usize, const N: usize> Default for Server<P, B, N> {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Run the server with a socket queue architecture that decouples socket acceptance from HTTP processing.
-///
-/// This function addresses the limitation of TCP stacks without accept queues (e.g., smoltcp/embassy-net)
-/// by using a signal-based coordination mechanism between acceptor and worker tasks. This ensures that
-/// the number of sockets in use never exceeds the available socket pool size, preventing resource exhaustion.
-///
-/// # Type Parameters
-///
-/// - `P`: Number of worker tasks that process HTTP requests (default: 4)
-/// - `Q`: Number of acceptor tasks and maximum sockets that can be allocated simultaneously (default: 8)
-///
-/// # Important Constraints
-///
-/// **CRITICAL**: The `Q` parameter must satisfy these constraints or the function will panic:
-/// - `Q` must be **less than or equal to** the number of sockets in your smoltcp/embassy-net socket pool
-///   - If `Q` exceeds the socket pool size, accept() calls will fail and cause panics
-/// - `Q` should be **greater than or equal to** `P` for the architecture to provide benefits
-///   - If `Q < P`, you lose the advantage of decoupling acceptance from processing
-///   - Recommended: `Q >= P` (e.g., Q=8 with P=4)
-///
-/// # Timeout Configuration
-///
-/// The function does NOT establish timeouts by default (except optional keepalive timeout):
-/// - Wrap the acceptor with `edge_nal::WithTimeout` to set socket-level timeouts
-/// - Wrap handler logic with `edge_nal::with_timeout` for request-response timeouts
-///
-/// # Parameters
-///
-/// - `server`: The server instance containing worker buffers
-/// - `keepalive_timeout_ms`: Optional timeout in milliseconds for idle keepalive connections
-/// - `acceptor`: An implementation of `edge_nal::TcpAccept` to accept incoming connections
-/// - `handler`: An implementation of `Handler` to handle incoming requests
-#[cfg(feature = "io")]
-pub async fn run_with_socket_queue<
-    A,
-    H,
-    const P: usize,
-    const Q: usize,
-    const B: usize,
-    const N: usize,
->(
-    server: &mut Server<P, B, N>,
-    keepalive_timeout_ms: Option<u32>,
-    acceptor: A,
-    handler: H,
-) -> Result<(), Error<A::Error>>
-where
-    A: edge_nal::TcpAccept,
-    H: Handler,
-{
-    use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-    use embassy_sync::channel::Channel;
-    use embassy_sync::signal::Signal;
-
-    // ============================================================================
-    // Internal Architecture
-    // ============================================================================
-    // This implementation uses a signal-based coordination mechanism:
-    //
-    // - Q acceptor tasks: Each waits for a signal before calling accept()
-    // - Each acceptor has its own signal indicating socket availability
-    // - Initially all Q signals are set, allowing Q concurrent accepts
-    // - When an acceptor accepts a connection, it enqueues (socket, acceptor_id)
-    // - P worker tasks dequeue from channel and process HTTP requests
-    // - When a worker finishes, it signals the specific acceptor that provided the socket
-    // - At most Q sockets allocated at any time (some accepting, some processing)
-    //
-    // This prevents socket pool exhaustion that would occur if all Q acceptors
-    // were simultaneously calling accept() while P workers were processing,
-    // which would require Q+P sockets. By tracking which acceptor provided each
-    // socket, workers signal the correct acceptor (one waiting on its signal,
-    // not busy on accept()).
-    //
-    // Threading: Uses NoopRawMutex for single-threaded executors (embassy-executor).
-    // For multi-threaded executors, a different mutex type would be needed.
-    // ============================================================================
-
-    // Create a channel to pass accepted sockets from acceptor tasks to worker tasks
-    // Each message contains the socket and the ID of the acceptor that accepted it
-    let socket_queue = Channel::<NoopRawMutex, (A::Socket<'_>, usize), Q>::new();
-
-    // Create signals for each acceptor task to coordinate socket availability
-    // When a worker finishes processing a socket, it signals an acceptor to accept a new connection
-    // This ensures we never have more sockets in use than available in the pool
-    let accept_signals: [Signal<NoopRawMutex, ()>; Q] = [(); Q].map(|_| Signal::new());
-
-    // Create Q acceptor tasks - each waits for its signal before accepting
-    // This ensures we never have more than (Q - sockets_in_use) acceptors calling accept()
-    let mut acceptor_tasks = heapless::Vec::<_, Q>::new();
-
-    info!(
-        "Creating {} acceptor tasks and {} worker tasks, queue size: {}",
-        Q, P, Q
-    );
-
-    for acceptor_id in 0..Q {
-        let acceptor = &acceptor;
-        let socket_queue = &socket_queue;
-        let signal = &accept_signals[acceptor_id];
-
-        unwrap!(acceptor_tasks
-            .push(async move {
-                loop {
-                    // Wait for signal that a socket is available
-                    // Initially all signals are ready, allowing Q concurrent accepts
-                    signal.wait().await;
-
-                    debug!(
-                        "Acceptor task {}: Got signal, waiting for connection",
-                        display2format!(acceptor_id)
-                    );
-
-                    match acceptor.accept().await {
-                        Ok((_, io)) => {
-                            debug!(
-                                "Acceptor task {}: Got connection, enqueueing",
-                                display2format!(acceptor_id)
-                            );
-
-                            // Send the socket along with the acceptor ID to the queue
-                            // This allows workers to signal the correct acceptor when done
-                            socket_queue.send((io, acceptor_id)).await;
-
-                            debug!(
-                                "Acceptor task {}: Connection enqueued",
-                                display2format!(acceptor_id)
-                            );
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Acceptor task {}: Error accepting connection: {:?}",
-                                display2format!(acceptor_id),
-                                debug2format!(e)
-                            );
-                            // Signal ourselves again to retry
-                            signal.signal(());
-                        }
-                    }
-                }
-            })
-            .map_err(|_| ()));
-    }
-
-    // Initially signal all acceptors to start accepting
-    for signal in &accept_signals {
-        signal.signal(());
-    }
-
-    // Create worker tasks
-    let mut worker_tasks = heapless::Vec::<_, P>::new();
-
-    for index in 0..P {
-        let task_id = index;
-        let handler = &handler;
-        let socket_queue = &socket_queue;
-        let accept_signals = &accept_signals;
-        // Safety: The server buffer array is properly initialized (MaybeUninit is used correctly),
-        // and each worker task gets exclusive access to its own buffer slice via its unique index.
-        // The pointer remains valid for the lifetime of the server and the buffer is not moved.
-        let buf: *mut [u8; B] = &mut unsafe { server.0.assume_init_mut() }[index];
-
-        unwrap!(worker_tasks
-            .push(async move {
-                loop {
-                    debug!(
-                        "Worker task {}: Waiting for connection from queue",
-                        display2format!(task_id)
-                    );
-
-                    // Receive an accepted socket from the queue along with the acceptor ID
-                    let (io, acceptor_id) = socket_queue.receive().await;
-
-                    debug!(
-                        "Worker task {}: Got connection from acceptor {} from queue",
-                        display2format!(task_id),
-                        display2format!(acceptor_id)
-                    );
-
-                    handle_connection::<_, _, N>(
-                        io,
-                        unwrap!(unsafe { buf.as_mut() }),
-                        keepalive_timeout_ms,
-                        task_id,
-                        handler,
-                    )
-                    .await;
-
-                    // Signal the specific acceptor that provided this socket
-                    // This ensures we signal an acceptor that's waiting on its signal,
-                    // not one that might be busy waiting on accept()
-                    debug!(
-                        "Worker task {}: Finished processing, signaling acceptor {}",
-                        display2format!(task_id),
-                        display2format!(acceptor_id)
-                    );
-                    accept_signals[acceptor_id].signal(());
-                }
-            })
-            .map_err(|_| ()));
-    }
-
-    // Pin tasks for select_slice
-    let acceptor_tasks = pin!(acceptor_tasks);
-    let acceptor_tasks = unsafe { acceptor_tasks.map_unchecked_mut(|t| t.as_mut_slice()) };
-
-    let worker_tasks = pin!(worker_tasks);
-    let worker_tasks = unsafe { worker_tasks.map_unchecked_mut(|t| t.as_mut_slice()) };
-
-    // Run all acceptor and worker tasks concurrently
-    // Use select to run both acceptors and workers, return if any completes
-    use embassy_futures::select::Either;
-    let result = embassy_futures::select::select(
-        async {
-            let (result, _acceptor_index): (Result<(), Error<A::Error>>, _) =
-                embassy_futures::select::select_slice(acceptor_tasks).await;
-            result
-        },
-        async {
-            let (result, _worker_index): (Result<(), Error<A::Error>>, _) =
-                embassy_futures::select::select_slice(worker_tasks).await;
-            result
-        },
-    )
-    .await;
-
-    // Neither acceptor nor worker tasks should complete normally
-    match result {
-        Either::First(Err(e)) => {
-            warn!("Acceptor task quit with error: {:?}", debug2format!(e));
-            Err(e)
-        }
-        Either::First(Ok(_)) => {
-            warn!("Acceptor task quit unexpectedly");
-            Ok(())
-        }
-        Either::Second(Err(e)) => {
-            warn!("Worker task quit with error: {:?}", debug2format!(e));
-            Err(e)
-        }
-        Either::Second(Ok(_)) => {
-            warn!("Worker task quit unexpectedly");
-            Ok(())
-        }
     }
 }

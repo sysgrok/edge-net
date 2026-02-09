@@ -811,45 +811,30 @@ impl<const P: usize, const B: usize, const N: usize> Default for Server<P, B, N>
 /// by using a signal-based coordination mechanism between acceptor and worker tasks. This ensures that
 /// the number of sockets in use never exceeds the available socket pool size, preventing resource exhaustion.
 ///
-/// Architecture:
-/// - `Q` acceptor tasks each wait for a signal before calling `accept()`
-/// - Each acceptor has its own signal that indicates a socket is available
-/// - Initially, all Q signals are set, allowing Q concurrent accepts
-/// - When an acceptor accepts a connection, it enqueues the socket along with its ID to a channel
-/// - `P` worker tasks dequeue sockets from the channel and process HTTP requests
-/// - When a worker finishes, it signals the specific acceptor that provided the socket
-/// - This ensures at most `Q` sockets are allocated at any time (some accepting, some processing)
+/// # Type Parameters
 ///
-/// The signal-based mechanism prevents the socket pool exhaustion that would occur if all Q acceptor
-/// tasks were simultaneously calling `accept()` while P workers were busy processing, which would
-/// require Q+P sockets total. By tracking which acceptor provided each socket, workers can signal
-/// the correct acceptor (one that's waiting on its signal, not busy on `accept()`).
+/// - `P`: Number of worker tasks that process HTTP requests (default: 4)
+/// - `Q`: Number of acceptor tasks and maximum sockets that can be allocated simultaneously (default: 8)
 ///
-/// # Threading Safety
+/// # Important Constraints
 ///
-/// **IMPORTANT**: This function is designed for single-threaded async executors (e.g., embassy-executor
-/// on embedded platforms) and uses `NoopRawMutex` for performance. The implementation assumes:
-/// - All async tasks run on the same thread (single-threaded executor)
-/// - The raw pointers to worker buffers are safe because each worker gets exclusive access via its unique index
-/// - No Send/Sync requirements between threads
+/// **CRITICAL**: The `Q` parameter must satisfy these constraints or the function will panic:
+/// - `Q` must be **less than or equal to** the number of sockets in your smoltcp/embassy-net socket pool
+///   - If `Q` exceeds the socket pool size, accept() calls will fail and cause panics
+/// - `Q` should be **greater than or equal to** `P` for the architecture to provide benefits
+///   - If `Q < P`, you lose the advantage of decoupling acceptance from processing
+///   - Recommended: `Q >= P` (e.g., Q=8 with P=4)
 ///
-/// If you need to use this with a multi-threaded executor, you'll need to modify the mutex type
-/// and add proper synchronization.
+/// # Timeout Configuration
 ///
-/// A note on timeouts:
-/// - The function does NOT - by default - establish any timeouts on the IO operations _except_
-///   an optional timeout on idle connections, so that they can be closed.
-///   It is up to the caller to wrap the acceptor type with `edge_nal::WithTimeout` to establish
-///   timeouts on the socket produced by the acceptor.
-/// - Similarly, the function does NOT establish any timeouts on the complete request-response cycle.
-///   It is up to the caller to wrap their complete or partial handling logic with
-///   `edge_nal::with_timeout`, or its whole handler with `edge_nal::WithTimeout`, so as to establish
-///   a global or semi-global request-response timeout.
+/// The function does NOT establish timeouts by default (except optional keepalive timeout):
+/// - Wrap the acceptor with `edge_nal::WithTimeout` to set socket-level timeouts
+/// - Wrap handler logic with `edge_nal::with_timeout` for request-response timeouts
 ///
-/// Parameters:
+/// # Parameters
+///
 /// - `server`: The server instance containing worker buffers
-/// - `keepalive_timeout_ms`: An optional timeout in milliseconds for detecting an idle keepalive
-///   connection that should be closed. If not provided, the function will not close idle connections
+/// - `keepalive_timeout_ms`: Optional timeout in milliseconds for idle keepalive connections
 /// - `acceptor`: An implementation of `edge_nal::TcpAccept` to accept incoming connections
 /// - `handler`: An implementation of `Handler` to handle incoming requests
 #[cfg(feature = "io")]
@@ -874,11 +859,31 @@ where
     use embassy_sync::channel::Channel;
     use embassy_sync::signal::Signal;
 
+    // ============================================================================
+    // Internal Architecture
+    // ============================================================================
+    // This implementation uses a signal-based coordination mechanism:
+    //
+    // - Q acceptor tasks: Each waits for a signal before calling accept()
+    // - Each acceptor has its own signal indicating socket availability
+    // - Initially all Q signals are set, allowing Q concurrent accepts
+    // - When an acceptor accepts a connection, it enqueues (socket, acceptor_id)
+    // - P worker tasks dequeue from channel and process HTTP requests
+    // - When a worker finishes, it signals the specific acceptor that provided the socket
+    // - At most Q sockets allocated at any time (some accepting, some processing)
+    //
+    // This prevents socket pool exhaustion that would occur if all Q acceptors
+    // were simultaneously calling accept() while P workers were processing,
+    // which would require Q+P sockets. By tracking which acceptor provided each
+    // socket, workers signal the correct acceptor (one waiting on its signal,
+    // not busy on accept()).
+    //
+    // Threading: Uses NoopRawMutex for single-threaded executors (embassy-executor).
+    // For multi-threaded executors, a different mutex type would be needed.
+    // ============================================================================
+
     // Create a channel to pass accepted sockets from acceptor tasks to worker tasks
     // Each message contains the socket and the ID of the acceptor that accepted it
-    // NoopRawMutex is appropriate for single-threaded async executors (e.g., embassy-executor).
-    // WARNING: For multi-threaded executors, use a different mutex implementation such as
-    // CriticalSectionRawMutex or ThreadModeRawMutex to avoid race conditions.
     let socket_queue = Channel::<NoopRawMutex, (A::Socket<'_>, usize), Q>::new();
 
     // Create signals for each acceptor task to coordinate socket availability

@@ -15,6 +15,7 @@ use crate::{ConnectionType, DEFAULT_MAX_HEADERS_COUNT};
 
 pub const DEFAULT_HANDLER_TASKS_COUNT: usize = 4;
 pub const DEFAULT_BUF_SIZE: usize = 2048;
+pub const DEFAULT_SOCKET_QUEUE_SIZE: usize = 8;
 
 const COMPLETION_BUF_SIZE: usize = 64;
 
@@ -682,6 +683,11 @@ impl<const P: usize, const B: usize, const N: usize> Server<P, B, N> {
     ///   For multi-threaded executors, the acceptor's internal state must be properly synchronized
     ///   (e.g., using atomics or locks).
     ///
+    /// **Deprecated**: Consider using `run_with_socket_queue()` instead for better connection handling
+    /// with TCP stacks that lack accept queues (e.g., smoltcp/embassy-net). The socket queue architecture
+    /// decouples connection acceptance from HTTP processing, allowing connections to be accepted even when
+    /// all worker tasks are busy.
+    ///
     /// Parameters:
     /// - `keepalive_timeout_ms`: An optional timeout in milliseconds for detecting an idle keepalive
     ///   connection that should be closed. If not provided, the function will not close idle connections
@@ -755,10 +761,201 @@ impl<const P: usize, const B: usize, const N: usize> Server<P, B, N> {
 
         result
     }
+
+    /// Run the server with a socket queue architecture (recommended for smoltcp/embassy-net)
+    ///
+    /// This method uses the socket queue architecture with a default queue size of `DEFAULT_SOCKET_QUEUE_SIZE`.
+    /// The socket queue decouples connection acceptance from HTTP processing, allowing the server to
+    /// accept incoming connections even when all worker tasks are busy processing requests.
+    ///
+    /// For TCP stacks without accept queues (e.g., smoltcp/embassy-net), this architecture provides
+    /// better connection handling by maintaining a pool of accepted sockets waiting to be processed.
+    ///
+    /// Parameters:
+    /// - `keepalive_timeout_ms`: An optional timeout in milliseconds for detecting an idle keepalive
+    ///   connection that should be closed. If not provided, the function will not close idle connections
+    /// - `acceptor`: An implementation of `edge_nal::TcpAccept` to accept incoming connections
+    /// - `handler`: An implementation of `Handler` to handle incoming requests
+    #[cfg(feature = "io")]
+    #[inline(never)]
+    #[cold]
+    pub async fn run_with_socket_queue<A, H>(
+        &mut self,
+        keepalive_timeout_ms: Option<u32>,
+        acceptor: A,
+        handler: H,
+    ) -> Result<(), Error<A::Error>>
+    where
+        A: edge_nal::TcpAccept,
+        H: Handler,
+    {
+        run_with_socket_queue::<_, _, P, { DEFAULT_SOCKET_QUEUE_SIZE }, B, N>(
+            self,
+            keepalive_timeout_ms,
+            acceptor,
+            handler,
+        )
+        .await
+    }
 }
 
 impl<const P: usize, const B: usize, const N: usize> Default for Server<P, B, N> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Run the server with a socket queue architecture that decouples socket acceptance from HTTP processing.
+///
+/// This function addresses the limitation of TCP stacks without accept queues (e.g., smoltcp/embassy-net)
+/// by maintaining a pool of accepted sockets that are waiting to be processed. This allows the server to
+/// accept incoming connections even when all HTTP worker tasks are busy processing requests.
+///
+/// Architecture:
+/// - One or more acceptor tasks continuously accept incoming connections and enqueue them
+/// - Worker tasks dequeue accepted connections and process HTTP requests
+/// - The queue size (`Q`) determines how many connections can be waiting for processing
+/// - The queue size should be >= number of worker tasks (`P`) for best results
+///
+/// A note on timeouts:
+/// - The function does NOT - by default - establish any timeouts on the IO operations _except_
+///   an optional timeout on idle connections, so that they can be closed.
+///   It is up to the caller to wrap the acceptor type with `edge_nal::WithTimeout` to establish
+///   timeouts on the socket produced by the acceptor.
+/// - Similarly, the function does NOT establish any timeouts on the complete request-response cycle.
+///   It is up to the caller to wrap their complete or partial handling logic with
+///   `edge_nal::with_timeout`, or its whole handler with `edge_nal::WithTimeout`, so as to establish
+///   a global or semi-global request-response timeout.
+///
+/// Parameters:
+/// - `server`: The server instance containing worker buffers
+/// - `keepalive_timeout_ms`: An optional timeout in milliseconds for detecting an idle keepalive
+///   connection that should be closed. If not provided, the function will not close idle connections
+/// - `acceptor`: An implementation of `edge_nal::TcpAccept` to accept incoming connections
+/// - `handler`: An implementation of `Handler` to handle incoming requests
+#[cfg(feature = "io")]
+pub async fn run_with_socket_queue<
+    A,
+    H,
+    const P: usize,
+    const Q: usize,
+    const B: usize,
+    const N: usize,
+>(
+    server: &mut Server<P, B, N>,
+    keepalive_timeout_ms: Option<u32>,
+    acceptor: A,
+    handler: H,
+) -> Result<(), Error<A::Error>>
+where
+    A: edge_nal::TcpAccept,
+    H: Handler,
+{
+    use embassy_sync::channel::Channel;
+    use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+
+    // Create a channel to pass accepted sockets from acceptor tasks to worker tasks
+    // NoopRawMutex is appropriate for single-threaded async executors (embassy-executor)
+    let socket_queue = Channel::<NoopRawMutex, _, Q>::new();
+
+    // Create acceptor task - continuously accepts connections and enqueues them
+    let acceptor_task = async {
+        loop {
+            debug!("Acceptor: Waiting for connection");
+
+            match acceptor.accept().await {
+                Ok((_, io)) => {
+                    debug!("Acceptor: Got connection, enqueueing");
+
+                    // Send the socket to the queue for workers to process
+                    socket_queue.send(io).await;
+
+                    debug!("Acceptor: Connection enqueued");
+                }
+                Err(e) => {
+                    warn!("Acceptor: Error accepting connection: {:?}", debug2format!(e));
+                    // Continue accepting despite errors
+                }
+            }
+        }
+    };
+
+    // Create worker tasks
+    let mut worker_tasks = heapless::Vec::<_, P>::new();
+
+    info!(
+        "Creating {} worker tasks with queue size {}, memory: {}B",
+        P,
+        Q,
+        core::mem::size_of_val(&worker_tasks)
+    );
+
+    for index in 0..P {
+        let task_id = index;
+        let handler = &handler;
+        let socket_queue = &socket_queue;
+        let buf: *mut [u8; B] = &mut unsafe { server.0.assume_init_mut() }[index];
+
+        unwrap!(worker_tasks
+            .push(async move {
+                loop {
+                    debug!(
+                        "Worker task {}: Waiting for connection from queue",
+                        display2format!(task_id)
+                    );
+
+                    // Receive an accepted socket from the queue
+                    let io = socket_queue.receive().await;
+
+                    debug!(
+                        "Worker task {}: Got connection from queue",
+                        display2format!(task_id)
+                    );
+
+                    handle_connection::<_, _, N>(
+                        io,
+                        unwrap!(unsafe { buf.as_mut() }),
+                        keepalive_timeout_ms,
+                        task_id,
+                        handler,
+                    )
+                    .await;
+                }
+            })
+            .map_err(|_| ()));
+    }
+
+    // Pin tasks for select_slice
+    let worker_tasks = pin!(worker_tasks);
+    let worker_tasks = unsafe { worker_tasks.map_unchecked_mut(|t| t.as_mut_slice()) };
+
+    // Run acceptor and all workers concurrently
+    let acceptor_task = pin!(acceptor_task);
+    
+    // Use select to run both acceptor and workers, return if any completes
+    use embassy_futures::select::Either;
+    let result = embassy_futures::select::select(
+        acceptor_task,
+        async {
+            let (result, _): (Result<(), Error<A::Error>>, _) = embassy_futures::select::select_slice(worker_tasks).await;
+            result
+        },
+    )
+    .await;
+
+    // The acceptor task never completes normally, so we only get here if a worker fails
+    match result {
+        Either::First(_) => {
+            warn!("Acceptor task quit unexpectedly");
+            Ok(())
+        }
+        Either::Second(Err(e)) => {
+            warn!("Worker task quit with error: {:?}", debug2format!(e));
+            Err(e)
+        }
+        Either::Second(Ok(_)) => {
+            warn!("Worker task quit unexpectedly");
+            Ok(())
+        }
     }
 }

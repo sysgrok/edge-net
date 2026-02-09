@@ -68,6 +68,10 @@ name = "http_server"
 required-features = ["std"]
 
 [[example]]
+name = "http_server_socket_queue"
+required-features = ["std"]
+
+[[example]]
 name = "mdns_responder"
 required-features = ["std"]
 

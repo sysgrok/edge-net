@@ -6,9 +6,6 @@ use edge_nal::{
     with_timeout, Close, Readable, TcpShutdown, TcpSplit, WithTimeout, WithTimeoutError,
 };
 
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embassy_sync::mutex::Mutex;
-
 use embedded_io_async::{ErrorType, Read, Write};
 
 use super::{send_headers, send_status, Body, Error, RequestHeaders, SendBody};
@@ -674,6 +671,14 @@ impl<const P: usize, const B: usize, const N: usize> Server<P, B, N> {
     ///   `edge_nal::with_timeout`, or its whole handler with `edge_nal::WithTimeout`, so as to establish
     ///   a global or semi-global request-response timeout.
     ///
+    /// A note on concurrent connection acceptance:
+    /// - All handler tasks concurrently call `accept()` to maximize connection acceptance capacity.
+    /// - This is critical for TCP stacks without accept queues (e.g., smoltcp/embassy-net), where
+    ///   incoming connections can only be accepted if at least one task is actively waiting in `accept()`.
+    /// - When a task is busy handling a request, other tasks remain available to accept new connections.
+    /// - The acceptor's buffer pool must be thread-safe (or used in a single-threaded async context)
+    ///   to support concurrent access by multiple tasks.
+    ///
     /// Parameters:
     /// - `keepalive_timeout_ms`: An optional timeout in milliseconds for detecting an idle keepalive
     ///   connection that should be closed. If not provided, the function will not close idle connections
@@ -693,7 +698,6 @@ impl<const P: usize, const B: usize, const N: usize> Server<P, B, N> {
         A: edge_nal::TcpAccept,
         H: Handler,
     {
-        let mutex = Mutex::<NoopRawMutex, _>::new(());
         let mut tasks = heapless::Vec::<_, P>::new();
 
         info!(
@@ -703,7 +707,6 @@ impl<const P: usize, const B: usize, const N: usize> Server<P, B, N> {
         );
 
         for index in 0..P {
-            let mutex = &mutex;
             let acceptor = &acceptor;
             let task_id = index;
             let handler = &handler;
@@ -717,11 +720,7 @@ impl<const P: usize, const B: usize, const N: usize> Server<P, B, N> {
                             display2format!(task_id)
                         );
 
-                        let io = {
-                            let _guard = mutex.lock().await;
-
-                            acceptor.accept().await.map_err(Error::Io)?.1
-                        };
+                        let io = acceptor.accept().await.map_err(Error::Io)?.1;
 
                         debug!(
                             "Handler task {}: Got connection request",

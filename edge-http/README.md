@@ -10,6 +10,19 @@ The implementation is based on the splendid [httparse](https://github.com/seanmo
 
 For other protocols, look at the [edge-net](https://github.com/ivmarkov/edge-net) aggregator crate documentation.
 
+## Socket Queue Architecture for smoltcp/embassy-net
+
+For TCP stacks without accept queues (e.g., smoltcp/embassy-net), this library provides a socket queue architecture
+that decouples connection acceptance from HTTP request processing. This allows the server to:
+
+- Accept incoming connections even when all HTTP worker tasks are busy processing requests
+- Maintain a pool of accepted sockets waiting to be processed (default queue size: 8)
+- Provide better handling of concurrent connections compared to the 1:1 socket-to-worker ratio
+
+**Use `server.run_with_socket_queue()` instead of `server.run()` for better connection handling with smoltcp/embassy-net.**
+
+See the [socket queue example](#http-server-with-socket-queue-recommended-for-smoltcpembassy-net) below for usage.
+
 ## Next steps
 
 Optimize further the memory consumption of the generated futures:
@@ -134,6 +147,84 @@ pub async fn run(server: &mut DefaultServer) -> Result<(), anyhow::Error> {
         .await?;
 
     server.run(None, acceptor, HttpHandler).await?;
+
+    Ok(())
+}
+
+struct HttpHandler;
+
+impl Handler for HttpHandler {
+    type Error<E>
+        = Error<E>
+    where
+        E: Debug;
+
+    async fn handle<T, const N: usize>(
+        &self,
+        _task_id: impl Display + Copy,
+        conn: &mut Connection<'_, T, N>,
+    ) -> Result<(), Self::Error<T::Error>>
+    where
+        T: Read + Write,
+    {
+        let headers = conn.headers()?;
+
+        if headers.method != Method::Get {
+            conn.initiate_response(405, Some("Method Not Allowed"), &[])
+                .await?;
+        } else if headers.path != "/" {
+            conn.initiate_response(404, Some("Not Found"), &[]).await?;
+        } else {
+            conn.initiate_response(200, Some("OK"), &[("Content-Type", "text/plain")])
+                .await?;
+
+            conn.write_all(b"Hello world!").await?;
+        }
+
+        Ok(())
+    }
+}
+```
+
+### HTTP server with socket queue (recommended for smoltcp/embassy-net)
+
+For TCP stacks without accept queues (e.g., smoltcp/embassy-net), use the socket queue architecture
+which decouples connection acceptance from HTTP processing, allowing connections to be accepted even
+when all worker tasks are busy:
+
+```rust
+use core::fmt::{Debug, Display};
+
+use edge_http::io::server::{Connection, DefaultServer, Handler};
+use edge_http::io::Error;
+use edge_http::Method;
+use edge_nal::TcpBind;
+
+use embedded_io_async::{Read, Write};
+
+use log::info;
+
+fn main() {
+    env_logger::init_from_env(
+        env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
+    );
+
+    let mut server = DefaultServer::new();
+
+    futures_lite::future::block_on(run(&mut server)).unwrap();
+}
+
+pub async fn run(server: &mut DefaultServer) -> Result<(), anyhow::Error> {
+    let addr = "0.0.0.0:8881";
+
+    info!("Running HTTP server with socket queue on {addr}");
+
+    let acceptor = edge_nal_std::Stack::new()
+        .bind(addr.parse().unwrap())
+        .await?;
+
+    // Use the socket queue architecture for better connection handling
+    server.run_with_socket_queue(None, acceptor, HttpHandler).await?;
 
     Ok(())
 }

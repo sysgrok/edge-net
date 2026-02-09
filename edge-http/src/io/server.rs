@@ -808,14 +808,19 @@ impl<const P: usize, const B: usize, const N: usize> Default for Server<P, B, N>
 /// Run the server with a socket queue architecture that decouples socket acceptance from HTTP processing.
 ///
 /// This function addresses the limitation of TCP stacks without accept queues (e.g., smoltcp/embassy-net)
-/// by maintaining a pool of accepted sockets that are waiting to be processed. This allows the server to
-/// accept incoming connections even when all HTTP worker tasks are busy processing requests.
+/// by maintaining multiple acceptor tasks that continuously call `accept()`. This ensures that there are
+/// always `Q` sockets in the smoltcp socket set ready to accept incoming connections, even when HTTP
+/// worker tasks are busy processing requests.
 ///
 /// Architecture:
-/// - One acceptor task continuously accepts incoming connections and enqueues them
-/// - Worker tasks dequeue accepted connections and process HTTP requests
-/// - The queue size (`Q`) determines how many connections can be waiting for processing
-/// - The queue size should be >= number of worker tasks (`P`) for best results
+/// - `Q` acceptor tasks continuously accept incoming connections and enqueue them to a channel
+/// - `P` worker tasks dequeue accepted connections from the channel and process HTTP requests
+/// - Each acceptor task holds one socket in the "accepting" state in smoltcp's socket set
+/// - When multiple connections arrive simultaneously, they can all be accepted (up to Q connections)
+/// - The channel size is `Q`, matching the number of acceptor tasks
+///
+/// This architecture solves the problem where a single acceptor task would only have one socket
+/// waiting in smoltcp, causing subsequent simultaneous connection attempts to be rejected.
 ///
 /// # Threading Safety
 ///
@@ -871,40 +876,59 @@ where
     // CriticalSectionRawMutex or ThreadModeRawMutex to avoid race conditions.
     let socket_queue = Channel::<NoopRawMutex, _, Q>::new();
 
-    // Create acceptor task - continuously accepts connections and enqueues them
-    let acceptor_task = async {
-        loop {
-            debug!("Acceptor: Waiting for connection");
+    // Create Q acceptor tasks - each continuously accepts connections and enqueues them
+    // This ensures Q sockets are always in the "accepting" state in smoltcp's socket set,
+    // allowing multiple simultaneous connections to be accepted
+    let mut acceptor_tasks = heapless::Vec::<_, Q>::new();
 
-            match acceptor.accept().await {
-                Ok((_, io)) => {
-                    debug!("Acceptor: Got connection, enqueueing");
+    info!(
+        "Creating {} acceptor tasks and {} worker tasks, queue size: {}",
+        Q, P, Q
+    );
 
-                    // Send the socket to the queue for workers to process
-                    socket_queue.send(io).await;
+    for acceptor_id in 0..Q {
+        let acceptor = &acceptor;
+        let socket_queue = &socket_queue;
 
-                    debug!("Acceptor: Connection enqueued");
-                }
-                Err(e) => {
-                    warn!(
-                        "Acceptor: Error accepting connection: {:?}",
-                        debug2format!(e)
+        unwrap!(acceptor_tasks
+            .push(async move {
+                loop {
+                    debug!(
+                        "Acceptor task {}: Waiting for connection",
+                        display2format!(acceptor_id)
                     );
-                    // Continue accepting despite errors
+
+                    match acceptor.accept().await {
+                        Ok((_, io)) => {
+                            debug!(
+                                "Acceptor task {}: Got connection, enqueueing",
+                                display2format!(acceptor_id)
+                            );
+
+                            // Send the socket to the queue for workers to process
+                            socket_queue.send(io).await;
+
+                            debug!(
+                                "Acceptor task {}: Connection enqueued",
+                                display2format!(acceptor_id)
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Acceptor task {}: Error accepting connection: {:?}",
+                                display2format!(acceptor_id),
+                                debug2format!(e)
+                            );
+                            // Continue accepting despite errors
+                        }
+                    }
                 }
-            }
-        }
-    };
+            })
+            .map_err(|_| ()));
+    }
 
     // Create worker tasks
     let mut worker_tasks = heapless::Vec::<_, P>::new();
-
-    info!(
-        "Creating {} worker tasks with queue size {}, memory: {}B",
-        P,
-        Q,
-        core::mem::size_of_val(&worker_tasks)
-    );
 
     for index in 0..P {
         let task_id = index;
@@ -945,24 +969,36 @@ where
     }
 
     // Pin tasks for select_slice
+    let acceptor_tasks = pin!(acceptor_tasks);
+    let acceptor_tasks = unsafe { acceptor_tasks.map_unchecked_mut(|t| t.as_mut_slice()) };
+
     let worker_tasks = pin!(worker_tasks);
     let worker_tasks = unsafe { worker_tasks.map_unchecked_mut(|t| t.as_mut_slice()) };
 
-    // Run acceptor and all workers concurrently
-    let acceptor_task = pin!(acceptor_task);
-
-    // Use select to run both acceptor and workers, return if any completes
+    // Run all acceptor and worker tasks concurrently
+    // Use select to run both acceptors and workers, return if any completes
     use embassy_futures::select::Either;
-    let result = embassy_futures::select::select(acceptor_task, async {
-        let (result, _worker_index): (Result<(), Error<A::Error>>, _) =
-            embassy_futures::select::select_slice(worker_tasks).await;
-        result
-    })
+    let result = embassy_futures::select::select(
+        async {
+            let (result, _acceptor_index): (Result<(), Error<A::Error>>, _) =
+                embassy_futures::select::select_slice(acceptor_tasks).await;
+            result
+        },
+        async {
+            let (result, _worker_index): (Result<(), Error<A::Error>>, _) =
+                embassy_futures::select::select_slice(worker_tasks).await;
+            result
+        },
+    )
     .await;
 
-    // The acceptor task never completes normally, so we only get here if a worker fails
+    // Neither acceptor nor worker tasks should complete normally
     match result {
-        Either::First(_) => {
+        Either::First(Err(e)) => {
+            warn!("Acceptor task quit with error: {:?}", debug2format!(e));
+            Err(e)
+        }
+        Either::First(Ok(_)) => {
             warn!("Acceptor task quit unexpectedly");
             Ok(())
         }

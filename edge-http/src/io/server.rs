@@ -862,8 +862,8 @@ where
     A: edge_nal::TcpAccept,
     H: Handler,
 {
-    use embassy_sync::channel::Channel;
     use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+    use embassy_sync::channel::Channel;
 
     // Create a channel to pass accepted sockets from acceptor tasks to worker tasks
     // NoopRawMutex is appropriate for single-threaded async executors (e.g., embassy-executor).
@@ -886,7 +886,10 @@ where
                     debug!("Acceptor: Connection enqueued");
                 }
                 Err(e) => {
-                    warn!("Acceptor: Error accepting connection: {:?}", debug2format!(e));
+                    warn!(
+                        "Acceptor: Error accepting connection: {:?}",
+                        debug2format!(e)
+                    );
                     // Continue accepting despite errors
                 }
             }
@@ -950,14 +953,11 @@ where
 
     // Use select to run both acceptor and workers, return if any completes
     use embassy_futures::select::Either;
-    let result = embassy_futures::select::select(
-        acceptor_task,
-        async {
-            let (result, _worker_index): (Result<(), Error<A::Error>>, _) =
-                embassy_futures::select::select_slice(worker_tasks).await;
-            result
-        },
-    )
+    let result = embassy_futures::select::select(acceptor_task, async {
+        let (result, _worker_index): (Result<(), Error<A::Error>>, _) =
+            embassy_futures::select::select_slice(worker_tasks).await;
+        result
+    })
     .await;
 
     // The acceptor task never completes normally, so we only get here if a worker fails

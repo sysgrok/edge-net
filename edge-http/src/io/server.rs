@@ -812,10 +812,21 @@ impl<const P: usize, const B: usize, const N: usize> Default for Server<P, B, N>
 /// accept incoming connections even when all HTTP worker tasks are busy processing requests.
 ///
 /// Architecture:
-/// - One or more acceptor tasks continuously accept incoming connections and enqueue them
+/// - One acceptor task continuously accepts incoming connections and enqueues them
 /// - Worker tasks dequeue accepted connections and process HTTP requests
 /// - The queue size (`Q`) determines how many connections can be waiting for processing
 /// - The queue size should be >= number of worker tasks (`P`) for best results
+///
+/// # Threading Safety
+///
+/// **IMPORTANT**: This function is designed for single-threaded async executors (e.g., embassy-executor
+/// on embedded platforms) and uses `NoopRawMutex` for performance. The implementation assumes:
+/// - All async tasks run on the same thread (single-threaded executor)
+/// - The raw pointers to worker buffers are safe because each worker gets exclusive access via its unique index
+/// - No Send/Sync requirements between threads
+///
+/// If you need to use this with a multi-threaded executor, you'll need to modify the mutex type
+/// and add proper synchronization.
 ///
 /// A note on timeouts:
 /// - The function does NOT - by default - establish any timeouts on the IO operations _except_
@@ -936,13 +947,13 @@ where
 
     // Run acceptor and all workers concurrently
     let acceptor_task = pin!(acceptor_task);
-    
+
     // Use select to run both acceptor and workers, return if any completes
     use embassy_futures::select::Either;
     let result = embassy_futures::select::select(
         acceptor_task,
         async {
-            let (result, _worker_index): (Result<(), Error<A::Error>>, _) = 
+            let (result, _worker_index): (Result<(), Error<A::Error>>, _) =
                 embassy_futures::select::select_slice(worker_tasks).await;
             result
         },

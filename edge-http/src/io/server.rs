@@ -676,8 +676,11 @@ impl<const P: usize, const B: usize, const N: usize> Server<P, B, N> {
     /// - This is critical for TCP stacks without accept queues (e.g., smoltcp/embassy-net), where
     ///   incoming connections can only be accepted if at least one task is actively waiting in `accept()`.
     /// - When a task is busy handling a request, other tasks remain available to accept new connections.
-    /// - The acceptor's buffer pool must be thread-safe (or used in a single-threaded async context)
-    ///   to support concurrent access by multiple tasks.
+    /// - **Threading safety**: The acceptor must be safe to use from multiple async tasks.
+    ///   For single-threaded async executors (e.g., embassy-executor on embedded platforms),
+    ///   acceptors using non-Sync types like `Cell` for internal state are safe.
+    ///   For multi-threaded executors, the acceptor's internal state must be properly synchronized
+    ///   (e.g., using atomics or locks).
     ///
     /// Parameters:
     /// - `keepalive_timeout_ms`: An optional timeout in milliseconds for detecting an idle keepalive

@@ -682,7 +682,7 @@ impl<const P: usize, const B: usize, const N: usize> Server<P, B, N> {
     ///   For multi-threaded executors, the acceptor's internal state must be properly synchronized
     ///   (e.g., using atomics or locks).
     ///
-    /// **Deprecated**: Consider using `run_with_socket_queue()` instead for better connection handling
+    /// Consider using `run_with_socket_queue()` instead for better connection handling
     /// with TCP stacks that lack accept queues (e.g., smoltcp/embassy-net). The socket queue architecture
     /// decouples connection acceptance from HTTP processing, allowing connections to be accepted even when
     /// all worker tasks are busy.

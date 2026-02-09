@@ -855,7 +855,9 @@ where
     use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 
     // Create a channel to pass accepted sockets from acceptor tasks to worker tasks
-    // NoopRawMutex is appropriate for single-threaded async executors (embassy-executor)
+    // NoopRawMutex is appropriate for single-threaded async executors (e.g., embassy-executor).
+    // WARNING: For multi-threaded executors, use a different mutex implementation such as
+    // CriticalSectionRawMutex or ThreadModeRawMutex to avoid race conditions.
     let socket_queue = Channel::<NoopRawMutex, _, Q>::new();
 
     // Create acceptor task - continuously accepts connections and enqueues them
@@ -894,6 +896,9 @@ where
         let task_id = index;
         let handler = &handler;
         let socket_queue = &socket_queue;
+        // Safety: The server buffer array is properly initialized (MaybeUninit is used correctly),
+        // and each worker task gets exclusive access to its own buffer slice via its unique index.
+        // The pointer remains valid for the lifetime of the server and the buffer is not moved.
         let buf: *mut [u8; B] = &mut unsafe { server.0.assume_init_mut() }[index];
 
         unwrap!(worker_tasks
@@ -937,7 +942,8 @@ where
     let result = embassy_futures::select::select(
         acceptor_task,
         async {
-            let (result, _): (Result<(), Error<A::Error>>, _) = embassy_futures::select::select_slice(worker_tasks).await;
+            let (result, _worker_index): (Result<(), Error<A::Error>>, _) = 
+                embassy_futures::select::select_slice(worker_tasks).await;
             result
         },
     )

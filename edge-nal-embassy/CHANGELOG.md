@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+* Update to `embassy-net` 0.9
+* Remove the unused `heapless` dependency
+* Raise MSRV to 1.91 to compile `smoltcp`
+
 ## [0.8.0] - 2026-01-01
 * Update the `edge-nal` and `embedded-io-async` dependencies
 

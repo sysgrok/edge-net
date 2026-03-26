@@ -163,7 +163,7 @@ where
     S: UdpSend<Error = R::Error>,
     RB: BufferAccess<[u8]>,
     SB: BufferAccess<[u8]>,
-    C: rand_core::RngCore,
+    C: rand_core::Rng,
     M: RawMutex,
 {
     /// Creates a new mDNS service with the provided handler, interfaces, and UDP receiver and sender.

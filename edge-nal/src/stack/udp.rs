@@ -39,7 +39,7 @@ where
 }
 
 /// This trait is implemented by UDP sockets that can be split into separate
-/// `send`, `receive`, multicastv4, and multicastv6 parts that can operate independently from each other
+/// `receive`, `send`, `MulticastV4`, and `MulticastV6` parts that can operate independently from each other
 /// (i.e., a full-duplex connection with multicasting capabilities)
 pub trait UdpSplitMulticast: UdpSplit {
     type MulticastV4<'a>: MulticastV4<Error = Self::Error>

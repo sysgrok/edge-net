@@ -11,14 +11,14 @@ on:
 
 jobs:
   compile:
-    name: Compile
+    name: Compile / Rust ${{ matrix.rust_toolchain }}
     runs-on: ubuntu-latest
 
     strategy:
       matrix:
         rust_toolchain:
           - nightly
-          - 1.88 # MSRV
+          - 1.88
 
     steps:
       - name: Setup | Checkout
@@ -35,18 +35,43 @@ jobs:
       - name: Build | Fmt Check
         run: cargo fmt -- --check
       - name: Build | Clippy
+        run: cargo clippy --features std --examples --no-deps -- -Dwarnings
+      - name: Build | Clippy - defmt
+        run: cargo clippy --features std,defmt --no-deps -- -Dwarnings
+      - name: Build | Clippy - log
+        run: cargo clippy --features std,log --examples --no-deps -- -Dwarnings
+      - name: Build | Default
+        run: cargo build --features log
+      - name: Build | Non-default
+        run: cargo build --no-default-features
+      - name: Build | Examples
+        run: cargo build --examples --features log
+      - name: Build | Examples - defmt
+        run: export DEFMT_LOG=trace; cargo check --examples --features std,defmt
+
+  embassy:
+    name: Embassy / Requires Rust 1.91
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup | Checkout
+        uses: actions/checkout@v2
+      - name: Setup | Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: 1.91
+          components: rustfmt, clippy
+      - name: Setup | Std
+        run: rustup component add rust-src --toolchain 1.91-x86_64-unknown-linux-gnu
+      - name: Setup | Set default toolchain
+        run: rustup default 1.91
+      - name: Build | Clippy
         run: cargo clippy --features std,edge-nal-embassy/all --examples --no-deps -- -Dwarnings
       - name: Build | Clippy - defmt
         run: cargo clippy --features std,edge-nal-embassy/all,defmt --no-deps -- -Dwarnings
       - name: Build | Clippy - log
         run: cargo clippy --features std,edge-nal-embassy/all,log --examples --no-deps -- -Dwarnings
-      - name: Build | Default
-        run: cargo build --features log
-      - name: Build | Non-default
-        run: cargo build --no-default-features
       - name: Build | Embassy
         run: cargo build --no-default-features --features embassy,defmt
-      - name: Build | Examples
-        run: cargo build --examples --features log
-      - name: Build | Examples - defmt
-        run: export DEFMT_LOG=trace; cargo check --examples --features std,defmt
+      - name: Test | edge-nal-embassy
+        run: cargo test -p edge-nal-embassy --all-features

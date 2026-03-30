@@ -2,7 +2,7 @@
 name = "edge-nal-embassy"
 version = "0.8.1"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.91"
 description = "An implementation of edge-nal based on `embassy-net`"
 repository = "https://github.com/ivmarkov/edge-net"
 readme = "README.md"
@@ -17,7 +17,7 @@ categories = [
 [features]
 default = ["all"]
 all = ["proto-ipv4", "proto-ipv6", "medium-ethernet", "medium-ip", "dns", "udp", "tcp", "multicast", "icmp", "dhcpv4", "dhcpv4-hostname"]
-defmt = ["dep:defmt", "heapless/defmt", "embassy-net/defmt"]
+defmt = ["dep:defmt", "embassy-net/defmt"]
 proto-ipv4 = ["embassy-net/proto-ipv4"]
 proto-ipv6 = ["embassy-net/proto-ipv6"]
 medium-ethernet = ["embassy-net/medium-ethernet"]
@@ -35,6 +35,5 @@ log = { workspace = true, default-features = false, optional = true }
 defmt = { workspace = true, default-features = false, optional = true }
 embedded-io-async = { workspace = true }
 edge-nal = { workspace = true }
-heapless = { workspace = true }
 embassy-net = { workspace = true }
 embassy-futures = { workspace = true }

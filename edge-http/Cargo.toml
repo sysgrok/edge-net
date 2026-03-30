@@ -18,7 +18,7 @@ categories = [
 [features]
 default = ["io"]
 std = ["io"]
-io = ["embedded-io-async", "edge-nal", "embassy-sync", "embassy-futures", "embassy-time"]
+io = ["embedded-io-async", "edge-nal", "embassy-sync", "embassy-futures"]
 defmt = ["dep:defmt", "heapless/defmt"]
 
 [dependencies]
@@ -32,4 +32,3 @@ base64 = { workspace = true, default-features = false }
 sha1_smol = { workspace = true, default-features = false }
 embassy-sync = { workspace = true, optional = true }
 embassy-futures = { workspace = true, optional = true }
-embassy-time = { workspace = true, optional = true }

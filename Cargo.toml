@@ -38,10 +38,10 @@ anyhow = "1"
 env_logger = "0.11"
 embedded-io-async = "0.7"
 embassy-time = { version = "0.5", features = ["std", "generic-queue-64"] }
-embassy-sync = "0.7"
+embassy-sync = "0.8"
 embassy-futures = "0.1.2"
 futures-lite = "2"
-rand = "0.9"
+rand = "0.10"
 
 [[example]]
 name = "captive_portal"
@@ -107,13 +107,13 @@ members = [
 
 [workspace.dependencies]
 embassy-futures = { version = "0.1.2", default-features = false }
-embassy-sync = { version = "0.7", default-features = false }
+embassy-sync = { version = "0.8", default-features = false }
 embassy-time = { version = "0.5", default-features = false }
 embedded-io-async = { version = "0.7", default-features = false }
-embassy-net = { version = "0.8", default-features = false }
+embassy-net = { version = "0.9", default-features = false }
 heapless = { version = "0.9", default-features = false }
 domain = { version = "0.11", default-features = false, features = ["heapless"] }
-rand_core = { version = "0.9", default-features = false }
+rand_core = { version = "0.10", default-features = false }
 num_enum = { version = "0.7", default-features = false }
 httparse = { version = "1.10", default-features = false }
 base64 = { version = "0.22", default-features = false }

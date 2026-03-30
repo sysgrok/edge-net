@@ -20,12 +20,17 @@ Run clippy with various feature combinations to ensure no warnings:
 
 ```bash
 # Standard features with examples
-cargo clippy --features std,edge-nal-embassy/all --examples --no-deps -- -Dwarnings
+cargo clippy --features std --examples --no-deps -- -Dwarnings
 
 # With defmt feature
-cargo clippy --features std,edge-nal-embassy/all,defmt --no-deps -- -Dwarnings
+cargo clippy --features std,defmt --no-deps -- -Dwarnings
 
 # With log feature and examples
+cargo clippy --features std,log --examples --no-deps -- -Dwarnings
+
+# Embassy / smoltcp checks (Requires Rust 1.91)
+cargo clippy --features std,edge-nal-embassy/all --examples --no-deps -- -Dwarnings
+cargo clippy --features std,edge-nal-embassy/all,defmt --no-deps -- -Dwarnings
 cargo clippy --features std,edge-nal-embassy/all,log --examples --no-deps -- -Dwarnings
 ```
 
@@ -39,7 +44,7 @@ cargo build --features log
 # No default features
 cargo build --no-default-features
 
-# Embassy with defmt
+# Embassy with defmt (Requires Rust 1.91)
 cargo build --no-default-features --features embassy,defmt
 
 # Examples with log
@@ -58,11 +63,12 @@ cargo test --all-features
 
 ## Toolchain Support
 
-CI runs on both:
+CI runs on:
 - **Nightly** Rust
 - **1.88** MSRV (Minimum Supported Rust Version)
+- **1.91** for Embassy / smoltcp checks that require it
 
-Ensure changes are compatible with both versions.
+Ensure each check keeps MSRV compatibility with its specified Rust version.
 
 ## Pre-PR Checklist
 
@@ -71,7 +77,7 @@ Before submitting or updating a PR, verify:
 - [ ] No clippy warnings with all feature combinations
 - [ ] All builds succeed with different feature configurations
 - [ ] All tests pass
-- [ ] Changes are compatible with MSRV (1.88)
+- [ ] Changes are compatible with their specified MSRV
 - [ ] Documentation is updated if needed
 - [ ] Examples are updated or added if needed
 
@@ -84,13 +90,13 @@ To quickly verify your changes locally before pushing:
 cargo fmt -- --check
 
 # Quick clippy check
-cargo clippy --features std,edge-nal-embassy/all --examples --no-deps -- -Dwarnings
+cargo clippy --features std --examples --no-deps -- -Dwarnings
 
 # Quick build check
 cargo build --features log
 
-# Run tests
-cargo test --all-features
+# Embassy test check (Requires Rust 1.91)
+cargo test -p edge-nal-embassy --all-features
 ```
 
 If all these pass, your PR should pass CI successfully.

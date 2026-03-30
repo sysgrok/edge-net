@@ -5,7 +5,7 @@ use edge_nal::{UdpReceive, UdpSend};
 use embassy_futures::select::{select, Either};
 use embassy_time::{Duration, Instant, Timer};
 
-use rand_core::RngCore;
+use rand_core::Rng;
 
 pub use super::*;
 
@@ -49,7 +49,7 @@ impl Lease {
         buf: &'a mut [u8],
     ) -> Result<(Self, NetworkInfo<'a>), Error<S::Error>>
     where
-        T: RngCore,
+        T: Rng,
         S: UdpReceive + UdpSend,
     {
         loop {
@@ -106,7 +106,7 @@ impl Lease {
         buf: &mut [u8],
     ) -> Result<(), Error<S::Error>>
     where
-        T: RngCore,
+        T: Rng,
         S: UdpReceive + UdpSend,
     {
         loop {
@@ -133,7 +133,7 @@ impl Lease {
         buf: &mut [u8],
     ) -> Result<bool, Error<S::Error>>
     where
-        T: RngCore,
+        T: Rng,
         S: UdpReceive + UdpSend,
     {
         info!("Renewing DHCP lease...");
@@ -170,7 +170,7 @@ impl Lease {
         buf: &mut [u8],
     ) -> Result<(), Error<S::Error>>
     where
-        T: RngCore,
+        T: Rng,
         S: UdpReceive + UdpSend,
     {
         let mut opt_buf = Options::buf();
@@ -194,7 +194,7 @@ impl Lease {
         timeout: Duration,
     ) -> Result<Settings<'a>, Error<S::Error>>
     where
-        T: RngCore,
+        T: Rng,
         S: UdpReceive + UdpSend,
     {
         info!("Discovering DHCP servers...");
@@ -253,7 +253,7 @@ impl Lease {
         retries: usize,
     ) -> Result<Option<Settings<'a>>, Error<S::Error>>
     where
-        T: RngCore,
+        T: Rng,
         S: UdpReceive + UdpSend,
     {
         for _ in 0..retries {

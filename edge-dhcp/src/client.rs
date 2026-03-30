@@ -1,4 +1,4 @@
-use rand_core::RngCore;
+use rand_core::Rng;
 
 use super::*;
 
@@ -14,7 +14,7 @@ pub struct Client<T> {
 
 impl<T> Client<T>
 where
-    T: RngCore,
+    T: Rng,
 {
     pub const fn new(rng: T, mac: [u8; 6]) -> Self {
         Self { rng, mac }

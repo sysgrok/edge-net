@@ -645,13 +645,11 @@ impl BodyType {
                             Err(HeadersMismatchError::BodyTypeError("Raw body response with a Keep-Alive connection. This is not allowed."))?;
                         }
                     }
-                    BodyType::Chunked => {
-                        if !http11 {
-                            warn!("Chunked body with an HTTP/1.0 connection. This is not allowed.");
-                            Err(HeadersMismatchError::BodyTypeError(
-                                "Chunked body with an HTTP/1.0 connection. This is not allowed.",
-                            ))?;
-                        }
+                    BodyType::Chunked if !http11 => {
+                        warn!("Chunked body with an HTTP/1.0 connection. This is not allowed.");
+                        Err(HeadersMismatchError::BodyTypeError(
+                            "Chunked body with an HTTP/1.0 connection. This is not allowed.",
+                        ))?;
                     }
                     _ => {}
                 }

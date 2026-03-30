@@ -849,10 +849,9 @@ impl<const P: usize, const B: usize, const N: usize> Server<P, B, N> {
             Q, P, Q
         );
 
-        for acceptor_id in 0..Q {
+        for (acceptor_id, signal) in accept_signals.iter().enumerate() {
             let acceptor = &acceptor;
             let socket_queue = &socket_queue;
-            let signal = &accept_signals[acceptor_id];
 
             unwrap!(acceptor_tasks
                 .push(async move {

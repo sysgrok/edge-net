@@ -387,18 +387,9 @@ where
         for remote_addr in
             core::iter::once(SocketAddr::V4(SocketAddrV4::new(IP_BROADCAST_ADDR, PORT)))
                 .filter(|_| self.ipv4_interface.is_some())
-                .chain(
-                    self.ipv6_interface
-                        .map(|interface| {
-                            SocketAddr::V6(SocketAddrV6::new(
-                                IPV6_BROADCAST_ADDR,
-                                PORT,
-                                0,
-                                interface,
-                            ))
-                        })
-                        .into_iter(),
-                )
+                .chain(self.ipv6_interface.map(|interface| {
+                    SocketAddr::V6(SocketAddrV6::new(IPV6_BROADCAST_ADDR, PORT, 0, interface))
+                }))
         {
             if !data.is_empty() {
                 debug!("Broadcasting mDNS entry to {}", remote_addr);

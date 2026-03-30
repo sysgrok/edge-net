@@ -21,7 +21,7 @@ use embedded_io_async::{ErrorType, Read, Write};
 
 use edge_nal::{
     AddrType, Dns, MulticastV4, MulticastV6, Readable, TcpAccept, TcpBind, TcpConnect, TcpShutdown,
-    TcpSplit, UdpBind, UdpConnect, UdpReceive, UdpSend, UdpSplit,
+    TcpSplit, UdpBind, UdpConnect, UdpReceive, UdpSend, UdpSplit, UdpSplitMulticast,
 };
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -573,6 +573,31 @@ impl UdpSplit for UdpSocket {
         let socket = &*self;
 
         (socket, socket)
+    }
+}
+
+impl UdpSplitMulticast for UdpSocket {
+    type MulticastV4<'a>
+        = &'a Self
+    where
+        Self: 'a;
+
+    type MulticastV6<'a>
+        = &'a Self
+    where
+        Self: 'a;
+
+    fn split_multicast(
+        &mut self,
+    ) -> (
+        Self::Receive<'_>,
+        Self::Send<'_>,
+        Self::MulticastV4<'_>,
+        Self::MulticastV6<'_>,
+    ) {
+        let socket = &*self;
+
+        (socket, socket, socket, socket)
     }
 }
 

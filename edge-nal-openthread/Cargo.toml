@@ -1,0 +1,26 @@
+[package]
+name = "edge-nal-openthread"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "An implementation of edge-nal's UDP traits over OpenThread (Thread), using `openthread`"
+repository = "https://github.com/sysgrok/edge-net"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+categories = [
+    "embedded",
+    "no-std::no-alloc",
+    "asynchronous",
+    "network-programming",
+]
+
+[features]
+default = []
+log = ["dep:log", "openthread/log"]
+defmt = ["dep:defmt", "openthread/defmt"]
+
+[dependencies]
+log = { workspace = true, default-features = false, optional = true }
+defmt = { workspace = true, default-features = false, optional = true }
+edge-nal = { workspace = true }
+openthread = { git = "https://github.com/sysgrok/openthread", default-features = false, features = ["udp"] }

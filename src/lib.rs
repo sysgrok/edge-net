@@ -9,7 +9,11 @@ pub use edge_mdns as mdns;
 pub use edge_nal as nal;
 #[cfg(feature = "embassy")]
 pub use edge_nal_embassy as embassy;
+#[cfg(feature = "openthread")]
+pub use edge_nal_openthread as openthread;
 #[cfg(feature = "std")]
 pub use edge_nal_std as std;
+#[cfg(feature = "tls")]
+pub use edge_nal_tls as tls;
 pub use edge_raw as raw;
 pub use edge_ws as ws;

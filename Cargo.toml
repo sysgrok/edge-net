@@ -16,9 +16,11 @@ default = ["io"]
 async-io-mini = ["std", "edge-nal-std/async-io-mini"]
 std = ["io", "edge-captive/std", "edge-dhcp/std", "edge-http/std", "edge-mdns/std", "edge-raw/std", "edge-ws/std", "edge-nal-std"]
 embassy = ["io", "edge-nal-embassy/all"]
+tls = ["edge-nal-tls/tls"]
+openthread = ["edge-nal-openthread"]
 io = ["edge-captive/io", "edge-dhcp/io", "edge-http/io", "edge-mdns/io", "edge-raw/io", "edge-ws/io", "edge-nal"]
-log = ["edge-captive/log", "edge-dhcp/log", "edge-http/log", "edge-mdns/log", "edge-raw/log", "edge-ws/log", "edge-nal-embassy?/log"]
-defmt = ["edge-captive/defmt", "edge-dhcp/defmt", "edge-http/defmt", "edge-mdns/defmt", "edge-raw/defmt", "edge-ws/defmt", "edge-nal-embassy?/defmt"]
+log = ["edge-captive/log", "edge-dhcp/log", "edge-http/log", "edge-mdns/log", "edge-raw/log", "edge-ws/log", "edge-nal-embassy?/log", "edge-nal-tls?/log", "edge-nal-openthread?/log"]
+defmt = ["edge-captive/defmt", "edge-dhcp/defmt", "edge-http/defmt", "edge-mdns/defmt", "edge-raw/defmt", "edge-ws/defmt", "edge-nal-embassy?/defmt", "edge-nal-tls?/defmt", "edge-nal-openthread?/defmt"]
 nightly = []
 
 [dependencies]
@@ -31,6 +33,8 @@ edge-raw = { workspace = true }
 edge-ws = { workspace = true }
 edge-nal-std = { workspace = true, optional = true }
 edge-nal-embassy = { workspace = true, optional = true }
+edge-nal-tls = { workspace = true, optional = true }
+edge-nal-openthread = { workspace = true, optional = true }
 
 [dev-dependencies]
 log = "0.4"
@@ -116,7 +120,8 @@ members = [
     "edge-ws",
     "edge-nal-std",
     "edge-nal-embassy",
-    "edge-nal-tls"
+    "edge-nal-tls",
+    "edge-nal-openthread"
 ]
 
 [workspace.dependencies]
@@ -145,3 +150,4 @@ edge-ws = { version = "0.7", path = "edge-ws", default-features = false }
 edge-nal-std = { version = "0.6", path = "edge-nal-std", default-features = false }
 edge-nal-embassy = { version = "0.8", path = "edge-nal-embassy", default-features = false }
 edge-nal-tls = { version = "0.1", path = "edge-nal-tls", default-features = false }
+edge-nal-openthread = { version = "0.1", path = "edge-nal-openthread", default-features = false }

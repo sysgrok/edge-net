@@ -7,7 +7,7 @@ categories = ["embedded", "hardware-support", "network-programming", "asynchrono
 keywords = ["embedded", "network"]
 description = "no_std and no-alloc async implementations of various network protocols."
 rust-version = "1.88"
-repository = "https://github.com/ivmarkov/edge-net"
+repository = "https://github.com/sysgrok/edge-net"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 
@@ -42,6 +42,11 @@ embassy-sync = "0.8"
 embassy-futures = "0.1.2"
 futures-lite = "2"
 rand = "0.10"
+# For the `tls_http_*` examples (HTTPS over `edge-nal-tls`; `mbedtls-rs` comes in transitively
+# and is reached through the `edge_nal_tls::mbedtls` re-export, so no direct dependency is needed)
+edge-nal-tls = { workspace = true, features = ["tls", "log"] }
+# `mbedtls-rs` (transitive, via `edge-nal-tls`) relies on `critical-section`; provide its std impl
+critical-section = { version = "1", features = ["std"] }
 
 [[example]]
 name = "captive_portal"
@@ -69,6 +74,14 @@ required-features = ["std"]
 
 [[example]]
 name = "http_server_socket_queue"
+required-features = ["std"]
+
+[[example]]
+name = "tls_http_client"
+required-features = ["std"]
+
+[[example]]
+name = "tls_http_server"
 required-features = ["std"]
 
 [[example]]
@@ -102,7 +115,8 @@ members = [
     "edge-raw",
     "edge-ws",
     "edge-nal-std",
-    "edge-nal-embassy"
+    "edge-nal-embassy",
+    "edge-nal-tls"
 ]
 
 [workspace.dependencies]
@@ -130,3 +144,4 @@ edge-raw = { version = "0.7", path = "edge-raw", default-features = false }
 edge-ws = { version = "0.7", path = "edge-ws", default-features = false }
 edge-nal-std = { version = "0.6", path = "edge-nal-std", default-features = false }
 edge-nal-embassy = { version = "0.8", path = "edge-nal-embassy", default-features = false }
+edge-nal-tls = { version = "0.1", path = "edge-nal-tls", default-features = false }

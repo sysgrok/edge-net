@@ -1,6 +1,6 @@
 # edge-http
 
-[![CI](https://github.com/ivmarkov/edge-net/actions/workflows/ci.yml/badge.svg)](https://github.com/ivmarkov/edge-net/actions/workflows/ci.yml)
+[![CI](https://github.com/sysgrok/edge-net/actions/workflows/ci.yml/badge.svg)](https://github.com/sysgrok/edge-net/actions/workflows/ci.yml)
 ![crates.io](https://img.shields.io/crates/v/edge-net.svg)
 [![Documentation](https://docs.rs/edge-net/badge.svg)](https://docs.rs/edge-net)
 
@@ -8,7 +8,7 @@ Async + `no_std` + no-alloc implementation of the HTTP protocol.
 
 The implementation is based on the splendid [httparse](https://github.com/seanmonstar/httparse) library.
 
-For other protocols, look at the [edge-net](https://github.com/ivmarkov/edge-net) aggregator crate documentation.
+For other protocols, look at the [edge-net](https://github.com/sysgrok/edge-net) aggregator crate documentation.
 
 ## Socket Queue Architecture for smoltcp/embassy-net
 

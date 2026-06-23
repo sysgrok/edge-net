@@ -1,0 +1,30 @@
+[package]
+name = "edge-nal-tls"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "An implementation of edge-nal's TCP factory and socket traits over TLS, using `mbedtls-rs`"
+repository = "https://github.com/sysgrok/edge-net"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+categories = [
+    "embedded",
+    "no-std::no-alloc",
+    "asynchronous",
+    "network-programming",
+]
+
+[features]
+# `tls` (enabled by default) pulls in `mbedtls-rs`'s full algorithm bundle for out-of-the-box
+# convenience. Trim it with `default-features = false` and select your own `mbedtls-rs` features.
+default = ["tls"]
+tls = ["mbedtls-rs/tls"]
+log = ["dep:log", "mbedtls-rs/log"]
+defmt = ["dep:defmt", "mbedtls-rs/defmt"]
+
+[dependencies]
+log = { workspace = true, default-features = false, optional = true }
+defmt = { workspace = true, default-features = false, optional = true }
+embedded-io-async = { workspace = true }
+edge-nal = { workspace = true }
+mbedtls-rs = { git = "https://github.com/esp-rs/mbedtls-rs", default-features = false }

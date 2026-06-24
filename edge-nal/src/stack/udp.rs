@@ -38,6 +38,52 @@ where
     }
 }
 
+/// This trait is implemented by UDP sockets that can be split into separate
+/// `receive`, `send`, `MulticastV4`, and `MulticastV6` parts that can operate independently from each other
+/// (i.e., a full-duplex connection with multicasting capabilities)
+pub trait UdpSplitMulticast: UdpSplit {
+    type MulticastV4<'a>: MulticastV4<Error = Self::Error>
+    where
+        Self: 'a;
+    type MulticastV6<'a>: MulticastV6<Error = Self::Error>
+    where
+        Self: 'a;
+
+    fn split_multicast(
+        &mut self,
+    ) -> (
+        Self::Receive<'_>,
+        Self::Send<'_>,
+        Self::MulticastV4<'_>,
+        Self::MulticastV6<'_>,
+    );
+}
+
+impl<T> UdpSplitMulticast for &mut T
+where
+    T: UdpSplitMulticast,
+{
+    type MulticastV4<'a>
+        = T::MulticastV4<'a>
+    where
+        Self: 'a;
+    type MulticastV6<'a>
+        = T::MulticastV6<'a>
+    where
+        Self: 'a;
+
+    fn split_multicast(
+        &mut self,
+    ) -> (
+        Self::Receive<'_>,
+        Self::Send<'_>,
+        Self::MulticastV4<'_>,
+        Self::MulticastV6<'_>,
+    ) {
+        (**self).split_multicast()
+    }
+}
+
 /// This is a factory trait for creating connected UDP sockets
 pub trait UdpConnect {
     /// Error type returned on socket creation failure
@@ -46,7 +92,7 @@ pub trait UdpConnect {
     /// The socket type returned by the factory
     type Socket<'a>: UdpReceive<Error = Self::Error>
         + UdpSend<Error = Self::Error>
-        + UdpSplit<Error = Self::Error>
+        + UdpSplitMulticast<Error = Self::Error>
         + MulticastV4<Error = Self::Error>
         + MulticastV6<Error = Self::Error>
         + Readable<Error = Self::Error>
@@ -69,7 +115,7 @@ pub trait UdpBind {
     /// The socket type returned by the stack
     type Socket<'a>: UdpReceive<Error = Self::Error>
         + UdpSend<Error = Self::Error>
-        + UdpSplit<Error = Self::Error>
+        + UdpSplitMulticast<Error = Self::Error>
         + MulticastV4<Error = Self::Error>
         + MulticastV6<Error = Self::Error>
         + Readable<Error = Self::Error>

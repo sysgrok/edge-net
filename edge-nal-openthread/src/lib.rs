@@ -203,6 +203,29 @@ impl edge_nal::UdpSplit for OtUdpSocket<'_> {
     }
 }
 
+impl edge_nal::UdpSplitMulticast for OtUdpSocket<'_> {
+    type MulticastV4<'a>
+        = &'a Self
+    where
+        Self: 'a;
+
+    type MulticastV6<'a>
+        = &'a Self
+    where
+        Self: 'a;
+
+    fn split_multicast(
+        &mut self,
+    ) -> (
+        Self::Receive<'_>,
+        Self::Send<'_>,
+        Self::MulticastV4<'_>,
+        Self::MulticastV6<'_>,
+    ) {
+        (&*self, &*self, &*self, &*self)
+    }
+}
+
 impl edge_nal::io::ErrorType for &OtUdpSocket<'_> {
     type Error = OtNalError;
 }

@@ -2,7 +2,9 @@ use core::fmt::Display;
 use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use core::ptr::NonNull;
 
-use edge_nal::{MulticastV4, MulticastV6, Readable, UdpBind, UdpReceive, UdpSend, UdpSplit};
+use edge_nal::{
+    MulticastV4, MulticastV6, Readable, UdpBind, UdpReceive, UdpSend, UdpSplit, UdpSplitMulticast,
+};
 
 use embassy_net::udp::{BindError, PacketMetadata, RecvError, SendError};
 use embassy_net::Stack;
@@ -111,6 +113,90 @@ impl<'d> UdpSocket<'d> {
             buffer_token: socket_buffers.token,
         })
     }
+
+    async fn join_v4(
+        &self,
+        #[allow(unused)] multicast_addr: Ipv4Addr,
+        _interface: Ipv4Addr,
+    ) -> Result<(), UdpError> {
+        #[cfg(feature = "multicast")]
+        {
+            self.stack.join_multicast_group(
+                crate::to_emb_addr(core::net::IpAddr::V4(multicast_addr))
+                    .ok_or(UdpError::UnsupportedProto)?,
+            )?;
+        }
+
+        #[cfg(not(feature = "multicast"))]
+        {
+            Err(UdpError::UnsupportedProto)?;
+        }
+
+        Ok(())
+    }
+
+    async fn leave_v4(
+        &self,
+        #[allow(unused)] multicast_addr: Ipv4Addr,
+        _interface: Ipv4Addr,
+    ) -> Result<(), UdpError> {
+        #[cfg(feature = "multicast")]
+        {
+            self.stack.leave_multicast_group(
+                crate::to_emb_addr(core::net::IpAddr::V4(multicast_addr))
+                    .ok_or(UdpError::UnsupportedProto)?,
+            )?;
+        }
+
+        #[cfg(not(feature = "multicast"))]
+        {
+            Err(UdpError::UnsupportedProto)?;
+        }
+
+        Ok(())
+    }
+
+    async fn join_v6(
+        &self,
+        #[allow(unused)] multicast_addr: Ipv6Addr,
+        _interface: u32,
+    ) -> Result<(), UdpError> {
+        #[cfg(feature = "multicast")]
+        {
+            self.stack.join_multicast_group(
+                crate::to_emb_addr(core::net::IpAddr::V6(multicast_addr))
+                    .ok_or(UdpError::UnsupportedProto)?,
+            )?;
+        }
+
+        #[cfg(not(feature = "multicast"))]
+        {
+            Err(UdpError::UnsupportedProto)?;
+        }
+
+        Ok(())
+    }
+
+    async fn leave_v6(
+        &self,
+        #[allow(unused)] multicast_addr: Ipv6Addr,
+        _interface: u32,
+    ) -> Result<(), UdpError> {
+        #[cfg(feature = "multicast")]
+        {
+            self.stack.leave_multicast_group(
+                crate::to_emb_addr(core::net::IpAddr::V6(multicast_addr))
+                    .ok_or(UdpError::UnsupportedProto)?,
+            )?;
+        }
+
+        #[cfg(not(feature = "multicast"))]
+        {
+            Err(UdpError::UnsupportedProto)?;
+        }
+
+        Ok(())
+    }
 }
 
 impl Drop for UdpSocket<'_> {
@@ -195,91 +281,98 @@ impl UdpSplit for UdpSocket<'_> {
     }
 }
 
+impl<'d> UdpSplitMulticast for UdpSocket<'d> {
+    type MulticastV4<'a>
+        = &'a Self
+    where
+        Self: 'a;
+
+    type MulticastV6<'a>
+        = &'a Self
+    where
+        Self: 'a;
+
+    fn split_multicast(
+        &mut self,
+    ) -> (
+        Self::Receive<'_>,
+        Self::Send<'_>,
+        Self::MulticastV4<'_>,
+        Self::MulticastV6<'_>,
+    ) {
+        (&*self, &*self, &*self, &*self)
+    }
+}
+
 impl MulticastV4 for UdpSocket<'_> {
     async fn join_v4(
         &mut self,
-        #[allow(unused)] multicast_addr: Ipv4Addr,
-        _interface: Ipv4Addr,
+        multicast_addr: Ipv4Addr,
+        interface: Ipv4Addr,
     ) -> Result<(), Self::Error> {
-        #[cfg(feature = "multicast")]
-        {
-            self.stack.join_multicast_group(
-                crate::to_emb_addr(core::net::IpAddr::V4(multicast_addr))
-                    .ok_or(UdpError::UnsupportedProto)?,
-            )?;
-        }
-
-        #[cfg(not(feature = "multicast"))]
-        {
-            Err(UdpError::UnsupportedProto)?;
-        }
-
-        Ok(())
+        Self::join_v4(self, multicast_addr, interface).await
     }
 
     async fn leave_v4(
         &mut self,
-        #[allow(unused)] multicast_addr: Ipv4Addr,
-        _interface: Ipv4Addr,
+        multicast_addr: Ipv4Addr,
+        interface: Ipv4Addr,
     ) -> Result<(), Self::Error> {
-        #[cfg(feature = "multicast")]
-        {
-            self.stack.leave_multicast_group(
-                crate::to_emb_addr(core::net::IpAddr::V4(multicast_addr))
-                    .ok_or(UdpError::UnsupportedProto)?,
-            )?;
-        }
+        Self::leave_v4(self, multicast_addr, interface).await
+    }
+}
 
-        #[cfg(not(feature = "multicast"))]
-        {
-            Err(UdpError::UnsupportedProto)?;
-        }
+impl MulticastV4 for &UdpSocket<'_> {
+    async fn join_v4(
+        &mut self,
+        multicast_addr: Ipv4Addr,
+        interface: Ipv4Addr,
+    ) -> Result<(), Self::Error> {
+        UdpSocket::join_v4(self, multicast_addr, interface).await
+    }
 
-        Ok(())
+    async fn leave_v4(
+        &mut self,
+        multicast_addr: Ipv4Addr,
+        interface: Ipv4Addr,
+    ) -> Result<(), Self::Error> {
+        UdpSocket::leave_v4(self, multicast_addr, interface).await
     }
 }
 
 impl MulticastV6 for UdpSocket<'_> {
     async fn join_v6(
         &mut self,
-        #[allow(unused)] multicast_addr: Ipv6Addr,
-        _interface: u32,
+        multicast_addr: Ipv6Addr,
+        interface: u32,
     ) -> Result<(), Self::Error> {
-        #[cfg(feature = "multicast")]
-        {
-            self.stack.join_multicast_group(
-                crate::to_emb_addr(core::net::IpAddr::V6(multicast_addr))
-                    .ok_or(UdpError::UnsupportedProto)?,
-            )?;
-        }
-
-        #[cfg(not(feature = "multicast"))]
-        {
-            Err(UdpError::UnsupportedProto)?;
-        }
-
-        Ok(())
+        Self::join_v6(self, multicast_addr, interface).await
     }
 
     async fn leave_v6(
         &mut self,
-        #[allow(unused)] multicast_addr: Ipv6Addr,
-        _interface: u32,
+        multicast_addr: Ipv6Addr,
+        interface: u32,
     ) -> Result<(), Self::Error> {
-        #[cfg(feature = "multicast")]
-        {
-            self.stack.leave_multicast_group(
-                crate::to_emb_addr(core::net::IpAddr::V6(multicast_addr))
-                    .ok_or(UdpError::UnsupportedProto)?,
-            )?;
-        }
+        Self::leave_v6(self, multicast_addr, interface).await
+    }
+}
 
-        #[cfg(not(feature = "multicast"))]
-        {
-            Err(UdpError::UnsupportedProto)?;
-        }
+impl MulticastV6 for &UdpSocket<'_> {
+    async fn join_v6(
+        &mut self,
+        multicast_addr: Ipv6Addr,
+        interface: u32,
+    ) -> Result<(), Self::Error> {
+        UdpSocket::join_v6(self, multicast_addr, interface).await
+    }
 
-        Ok(())
+    async fn leave_v6(
+        &mut self,
+        multicast_addr: Ipv6Addr,
+        interface: u32,
+    ) -> Result<(), Self::Error> {
+        UdpSocket::leave_v6(self, multicast_addr, interface).await
     }
 }
 

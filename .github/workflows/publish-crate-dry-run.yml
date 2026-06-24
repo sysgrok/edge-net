@@ -11,6 +11,8 @@ on:
         - edge-nal
         - edge-nal-std
         - edge-nal-embassy
+        - edge-nal-tls
+        - edge-nal-openthread
         - edge-captive
         - edge-raw
         - edge-dhcp
@@ -27,14 +29,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Setup | Checkout
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
       - name: Setup | Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.rust_toolchain }}
-      - name: Setup | Std
-        run: rustup component add rust-src --toolchain ${{ env.rust_toolchain }}-x86_64-unknown-linux-gnu
-      - name: Setup | Set default toolchain
-        run: rustup default ${{ env.rust_toolchain }}
+          components: rust-src
       - name: Build | Publish Dry Run
         run: cd "${{ github.event.inputs.crate }}"; cargo publish --dry-run
+      - name: Get the crate version from cargo
+        run: |
+          version=$(cargo metadata --format-version=1 --no-deps | jq -r ".packages[] | select(.name == \"${{github.event.inputs.crate}}\") | .version")
+          echo "crate_version=$version" >> $GITHUB_ENV
+          echo "${{github.event.inputs.crate}} version: $version"
+      - name: Tag the new release (dry run)
+        run: |
+          echo "Would create tag: ${{github.event.inputs.crate}}-v${{env.crate_version}}"
+          echo "Would use message: Release ${{github.event.inputs.crate}} v${{env.crate_version}}"

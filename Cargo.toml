@@ -131,7 +131,7 @@ embassy-time = { version = "0.5", default-features = false }
 embedded-io-async = { version = "0.7", default-features = false }
 embassy-net = { version = "0.9", default-features = false }
 heapless = { version = "0.9", default-features = false }
-domain = { version = "0.11", default-features = false, features = ["heapless"] }
+domain = { version = "0.12.1", default-features = false, features = ["heapless"] }
 rand_core = { version = "0.10", default-features = false }
 num_enum = { version = "0.7", default-features = false }
 httparse = { version = "1.10", default-features = false }

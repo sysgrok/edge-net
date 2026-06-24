@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 * Breaking: new trait: `UdpSplitMulticast` which is now required on the socket provided by `UdpBind` and `UdpConnect`
+* New type - `NoopNet` that implements all traits, but panics on every operation
 
 ## [0.6.0] - 2026-01-01
 * Update the `embedded-io-async` and `embassy-time` dependencies

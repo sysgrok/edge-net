@@ -4,6 +4,7 @@
 #![allow(unknown_lints)]
 
 pub use multicast::*;
+pub use noop::*;
 pub use raw::*;
 pub use readable::*;
 pub use tcp::*;
@@ -13,6 +14,7 @@ pub use udp::*;
 pub use stack::*;
 
 mod multicast;
+mod noop;
 mod raw;
 mod readable;
 mod stack;

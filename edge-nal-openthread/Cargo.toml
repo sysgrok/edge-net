@@ -23,4 +23,4 @@ defmt = ["dep:defmt", "openthread/defmt"]
 log = { workspace = true, default-features = false, optional = true }
 defmt = { workspace = true, default-features = false, optional = true }
 edge-nal = { workspace = true }
-openthread = { git = "https://github.com/sysgrok/openthread", default-features = false, features = ["udp"] }
+openthread = { git = "https://github.com/esp-rs/openthread", default-features = false, features = ["udp"] }

@@ -27,4 +27,4 @@ log = { workspace = true, default-features = false, optional = true }
 defmt = { workspace = true, default-features = false, optional = true }
 embedded-io-async = { workspace = true }
 edge-nal = { workspace = true }
-mbedtls-rs = { git = "https://github.com/esp-rs/mbedtls-rs", default-features = false }
+mbedtls-rs = { workspace = true, default-features = false }

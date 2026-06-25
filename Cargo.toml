@@ -1,6 +1,6 @@
 [package]
 name = "edge-net"
-version = "0.13.1"
+version = "0.14.0"
 authors = ["Ivan Markov <ivan.markov@gmail.com>"]
 edition = "2021"
 categories = ["embedded", "hardware-support", "network-programming", "asynchronous"]
@@ -139,15 +139,17 @@ base64 = { version = "0.22", default-features = false }
 sha1_smol = { version = "1", default-features = false }
 log = { version = "0.4", default-features = false }
 defmt = { version = "1", default-features = false, features = ["ip_in_core"] }
+mbedtls-rs = { version = "0.1", default-features = false }
+openthread = { version = "0.2", default-features = false }
 
-edge-captive = { version = "0.7", path = "edge-captive", default-features = false }
-edge-dhcp = { version = "0.7", path = "edge-dhcp", default-features = false }
-edge-http = { version = "0.7", path = "edge-http", default-features = false }
-edge-mdns = { version = "0.7", path = "edge-mdns", default-features = false }
-edge-nal = { version = "0.6", path = "edge-nal", default-features = false }
-edge-raw = { version = "0.7", path = "edge-raw", default-features = false }
-edge-ws = { version = "0.7", path = "edge-ws", default-features = false }
-edge-nal-std = { version = "0.6", path = "edge-nal-std", default-features = false }
-edge-nal-embassy = { version = "0.8", path = "edge-nal-embassy", default-features = false }
+edge-captive = { version = "0.8", path = "edge-captive", default-features = false }
+edge-dhcp = { version = "0.8", path = "edge-dhcp", default-features = false }
+edge-http = { version = "0.8", path = "edge-http", default-features = false }
+edge-mdns = { version = "0.8", path = "edge-mdns", default-features = false }
+edge-nal = { version = "0.7", path = "edge-nal", default-features = false }
+edge-raw = { version = "0.8", path = "edge-raw", default-features = false }
+edge-ws = { version = "0.8", path = "edge-ws", default-features = false }
+edge-nal-std = { version = "0.7", path = "edge-nal-std", default-features = false }
+edge-nal-embassy = { version = "0.9", path = "edge-nal-embassy", default-features = false }
 edge-nal-tls = { version = "0.1", path = "edge-nal-tls", default-features = false }
 edge-nal-openthread = { version = "0.1", path = "edge-nal-openthread", default-features = false }

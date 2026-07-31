@@ -663,12 +663,10 @@ impl DhcpOption<'_> {
                 MAXIMUM_DHCP_MESSAGE_SIZE => {
                     DhcpOption::MaximumMessageSize(u16::from_be_bytes(bytes.remaining_arr()?))
                 }
-                ROUTER => {
-                    DhcpOption::Router(Ipv4Addrs(Ipv4AddrsInner::ByteSlice(bytes.remaining())))
+                ROUTER => DhcpOption::Router(Ipv4Addrs::decode(bytes.remaining())?),
+                DOMAIN_NAME_SERVER => {
+                    DhcpOption::DomainNameServer(Ipv4Addrs::decode(bytes.remaining())?)
                 }
-                DOMAIN_NAME_SERVER => DhcpOption::DomainNameServer(Ipv4Addrs(
-                    Ipv4AddrsInner::ByteSlice(bytes.remaining()),
-                )),
                 IP_ADDRESS_LEASE_TIME => {
                     DhcpOption::IpAddressLeaseTime(u32::from_be_bytes(bytes.remaining_arr()?))
                 }
@@ -694,10 +692,26 @@ impl DhcpOption<'_> {
     }
 
     fn encode(&self, out: &mut BytesOut) -> Result<(), Error> {
-        out.byte(self.code())?;
+        // `Self::data` may supply the option data in more than one chunk
+        // (one chunk per IP address, in the case of `Router` and `DomainNameServer`),
+        // while a DHCP option carries a single length byte covering all of the data.
+        // Hence the data is first measured, and only then emitted.
+        let mut len = 0_usize;
 
         self.data(|data| {
-            out.byte(data.len() as _)?;
+            len += data.len();
+
+            Ok(())
+        })?;
+
+        if len > u8::MAX as usize {
+            return Err(Error::BufferOverflow);
+        }
+
+        out.byte(self.code())?;
+        out.byte(len as _)?;
+
+        self.data(|data| {
             out.push(data)?;
 
             Ok(())
@@ -760,6 +774,16 @@ impl<'a> Ipv4Addrs<'a> {
     pub fn iter(&self) -> impl Iterator<Item = Ipv4Addr> + 'a {
         self.0.iter()
     }
+
+    /// Decodes the data of a `Router` or a `DomainNameServer` DHCP option,
+    /// which is a sequence of 4-byte IPv4 addresses
+    fn decode(data: &'a [u8]) -> Result<Self, Error> {
+        if !data.len().is_multiple_of(4) {
+            Err(Error::InvalidPacket)?;
+        }
+
+        Ok(Self(Ipv4AddrsInner::ByteSlice(data)))
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -772,13 +796,13 @@ enum Ipv4AddrsInner<'a> {
 impl<'a> Ipv4AddrsInner<'a> {
     fn iter(&self) -> impl Iterator<Item = Ipv4Addr> + 'a {
         match self {
-            Self::ByteSlice(data) => {
-                EitherIterator::First((0..data.len()).step_by(4).map(|offset| {
-                    let octets: [u8; 4] = unwrap!(data[offset..offset + 4].try_into());
+            // `chunks_exact` rather than a `step_by(4)` indexing, so that a data slice
+            // with a length which is not a multiple of 4 cannot panic
+            Self::ByteSlice(data) => EitherIterator::First(data.chunks_exact(4).map(|octets| {
+                let octets: [u8; 4] = unwrap!(octets.try_into());
 
-                    octets.into()
-                }))
-            }
+                octets.into()
+            })),
             Self::DataSlice(data) => EitherIterator::Second(data.iter().cloned()),
         }
     }
@@ -820,3 +844,162 @@ const MESSAGE: u8 = 56;
 const MAXIMUM_DHCP_MESSAGE_SIZE: u8 = 57;
 const CLIENT_IDENTIFIER: u8 = 61;
 const CAPTIVE_URL: u8 = 114;
+
+#[cfg(test)]
+mod test {
+    use edge_raw::bytes::BytesOut;
+
+    use super::{DhcpOption, Ipv4Addr, Ipv4Addrs, MessageType, Options, Packet};
+
+    /// A `Router` / `DomainNameServer` option carries all of its addresses
+    /// under a single length byte, rather than one length byte per address
+    #[test]
+    fn test_encode_multiple_addrs() {
+        let addrs = [
+            Ipv4Addr::new(192, 168, 0, 1),
+            Ipv4Addr::new(8, 8, 8, 8),
+            Ipv4Addr::new(1, 1, 1, 1),
+        ];
+
+        let mut buf = [0; 32];
+        let mut out = BytesOut::new(&mut buf);
+
+        DhcpOption::DomainNameServer(Ipv4Addrs::new(&addrs))
+            .encode(&mut out)
+            .unwrap();
+
+        let len = out.len();
+
+        assert_eq!(
+            &buf[..len],
+            &[
+                super::DOMAIN_NAME_SERVER,
+                12,
+                192,
+                168,
+                0,
+                1,
+                8,
+                8,
+                8,
+                8,
+                1,
+                1,
+                1,
+                1
+            ]
+        );
+    }
+
+    /// An offer carrying multiple gateways and DNS servers decodes back
+    /// to exactly what was encoded, with all the options intact
+    #[test]
+    fn test_reply_with_multiple_addrs_roundtrip() {
+        let gateways = [Ipv4Addr::new(192, 168, 0, 1), Ipv4Addr::new(192, 168, 0, 2)];
+        let dns = [Ipv4Addr::new(8, 8, 8, 8), Ipv4Addr::new(1, 1, 1, 1)];
+
+        let mut reply_opt_buf = Options::buf();
+
+        let request = Packet::new_request(
+            [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+            42,
+            0,
+            None,
+            true,
+            Options::new(&[
+                DhcpOption::MessageType(MessageType::Discover),
+                DhcpOption::ParameterRequestList(&[
+                    DhcpOption::CODE_ROUTER,
+                    DhcpOption::CODE_DNS,
+                    DhcpOption::CODE_SUBNET,
+                ]),
+            ]),
+        );
+
+        let reply = request.new_reply(
+            Some(Ipv4Addr::new(192, 168, 0, 100)),
+            request.options.reply(
+                MessageType::Offer,
+                Ipv4Addr::new(192, 168, 0, 1),
+                3600,
+                &gateways,
+                Some(Ipv4Addr::new(255, 255, 255, 0)),
+                &dns,
+                None,
+                &mut reply_opt_buf,
+            ),
+        );
+
+        let mut buf = [0; 1024];
+        let data = reply.encode(&mut buf).unwrap();
+
+        let decoded = Packet::decode(data).unwrap();
+
+        let mut options = 0;
+
+        for option in decoded.options.iter() {
+            options += 1;
+
+            match option {
+                DhcpOption::Router(addrs) => {
+                    assert!(addrs.iter().eq(gateways.iter().cloned()))
+                }
+                DhcpOption::DomainNameServer(addrs) => {
+                    assert!(addrs.iter().eq(dns.iter().cloned()))
+                }
+                DhcpOption::MessageType(mt) => assert_eq!(mt, MessageType::Offer),
+                DhcpOption::ServerIdentifier(ip) => {
+                    assert_eq!(ip, Ipv4Addr::new(192, 168, 0, 1))
+                }
+                DhcpOption::IpAddressLeaseTime(secs) => assert_eq!(secs, 3600),
+                DhcpOption::SubnetMask(mask) => {
+                    assert_eq!(mask, Ipv4Addr::new(255, 255, 255, 0))
+                }
+                other => panic!("Unexpected option: {:?}", other),
+            }
+        }
+
+        assert_eq!(options, 6);
+    }
+
+    /// A `Router` / `DomainNameServer` option whose length is not a multiple of 4
+    /// is rejected when decoding the packet, rather than panicking when iterating
+    /// over its addresses
+    #[test]
+    fn test_decode_malformed_addrs() {
+        // op, htype, hlen, hops, xid, secs, flags,
+        // ciaddr, yiaddr, siaddr, giaddr, chaddr, sname + file, cookie
+        let mut packet = [0; 240];
+        packet[..4].copy_from_slice(&[2, 1, 6, 0]);
+        packet[236..].copy_from_slice(&[99, 130, 83, 99]);
+
+        let mut buf = [0; 256];
+
+        const END: u8 = super::Packet::END;
+
+        for (option, valid) in [
+            (&[super::ROUTER, 5, 192, 168, 0, 1, 7, END][..], false),
+            (
+                &[super::DOMAIN_NAME_SERVER, 5, 8, 8, 8, 8, 1, END][..],
+                false,
+            ),
+            (&[super::ROUTER, 4, 192, 168, 0, 1, END][..], true),
+        ] {
+            buf[..packet.len()].copy_from_slice(&packet);
+            buf[packet.len()..packet.len() + option.len()].copy_from_slice(option);
+
+            let data = &buf[..packet.len() + option.len()];
+
+            if valid {
+                let decoded = Packet::decode(data).unwrap();
+
+                assert!(decoded.options.iter().any(|option| matches!(
+                    option,
+                    DhcpOption::Router(addrs) if addrs.iter().eq([Ipv4Addr::new(192, 168, 0, 1)])
+                )));
+            } else {
+                assert_eq!(Packet::decode(data), Err(super::Error::InvalidPacket));
+            }
+        }
+    }
+}

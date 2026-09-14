@@ -1,6 +1,6 @@
 [package]
 name = "edge-nal-tls"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.88"
 description = "An implementation of edge-nal's TCP factory and socket traits over TLS, using `mbedtls-rs`"

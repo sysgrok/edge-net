@@ -953,7 +953,8 @@ impl<const P: usize, const B: usize, const N: usize> Server<P, B, N> {
         }
 
         // Pin tasks for select_slice
-        let acceptor_tasks = unsafe { core::pin::Pin::new_unchecked(acceptor_tasks.as_mut_slice()) };
+        let acceptor_tasks =
+            unsafe { core::pin::Pin::new_unchecked(acceptor_tasks.as_mut_slice()) };
         let worker_tasks = unsafe { core::pin::Pin::new_unchecked(worker_tasks.as_mut_slice()) };
 
         // Run all acceptor and worker tasks concurrently

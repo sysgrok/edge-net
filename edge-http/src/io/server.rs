@@ -748,9 +748,7 @@ impl<const P: usize, const B: usize, const N: usize> Server<P, B, N> {
                 .map_err(|_| ()));
         }
 
-        let tasks = pin!(tasks);
-
-        let tasks = unsafe { tasks.map_unchecked_mut(|t| t.as_mut_slice()) };
+        let tasks = unsafe { core::pin::Pin::new_unchecked(tasks.as_mut_slice()) };
         let (result, _) = embassy_futures::select::select_slice(tasks).await;
 
         warn!(
@@ -955,11 +953,8 @@ impl<const P: usize, const B: usize, const N: usize> Server<P, B, N> {
         }
 
         // Pin tasks for select_slice
-        let acceptor_tasks = pin!(acceptor_tasks);
-        let acceptor_tasks = unsafe { acceptor_tasks.map_unchecked_mut(|t| t.as_mut_slice()) };
-
-        let worker_tasks = pin!(worker_tasks);
-        let worker_tasks = unsafe { worker_tasks.map_unchecked_mut(|t| t.as_mut_slice()) };
+        let acceptor_tasks = unsafe { core::pin::Pin::new_unchecked(acceptor_tasks.as_mut_slice()) };
+        let worker_tasks = unsafe { core::pin::Pin::new_unchecked(worker_tasks.as_mut_slice()) };
 
         // Run all acceptor and worker tasks concurrently
         // Use select to run both acceptors and workers, return if any completes

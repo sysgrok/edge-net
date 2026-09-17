@@ -4,7 +4,6 @@
 #![allow(clippy::uninlined_format_args)]
 #![allow(unknown_lints)]
 
-use core::cmp::Ordering;
 use core::fmt::Display;
 use core::ops::RangeBounds;
 
@@ -137,48 +136,44 @@ impl ToName for NameSlice<'_> {}
 pub struct NameSliceIter<'a> {
     name: &'a NameSlice<'a>,
     index: usize,
+    index_back: usize,
+}
+
+impl<'a> NameSliceIter<'a> {
+    fn label(&self, index: usize) -> &'a Label {
+        let label = if index == self.name.0.len() {
+            Label::root()
+        } else {
+            unwrap!(
+                Label::from_slice(self.name.0[index].as_bytes()),
+                "Unreachable"
+            )
+        };
+        label
+    }
 }
 
 impl<'a> Iterator for NameSliceIter<'a> {
     type Item = &'a Label;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.index.cmp(&self.name.0.len()) {
-            Ordering::Less => {
-                let label = unwrap!(
-                    Label::from_slice(self.name.0[self.index].as_bytes()),
-                    "Unreachable"
-                );
-                self.index += 1;
-                Some(label)
-            }
-            Ordering::Equal => {
-                let label = Label::root();
-                self.index += 1;
-                Some(label)
-            }
-            Ordering::Greater => None,
+        if self.index == self.index_back {
+            return None;
         }
+        let label = self.label(self.index);
+        self.index += 1;
+        Some(label)
     }
 }
 
 impl DoubleEndedIterator for NameSliceIter<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        if self.index > 0 {
-            self.index -= 1;
-            if self.index == self.name.0.len() {
-                let label = Label::root();
-                Some(label)
-            } else {
-                let label = unwrap!(
-                    Label::from_slice(self.name.0[self.index].as_bytes()),
-                    "Unreachable"
-                );
-                Some(label)
-            }
-        } else {
-            None
+        if self.index_back == self.index {
+            return None;
         }
+        let label = self.label(self.index_back - 1);
+        self.index_back -= 1;
+        Some(label)
     }
 }
 
@@ -192,6 +187,7 @@ impl ToLabelIter for NameSlice<'_> {
         NameSliceIter {
             name: self,
             index: 0,
+            index_back: self.0.len() + 1,
         }
     }
 }
@@ -1083,4 +1079,55 @@ pub fn set_header<T: Composer>(answer: &mut MessageBuilder<T>, id: u16, response
     flags.qr = response;
     flags.aa = response;
     header.set_flags(flags);
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn name_slice_iter_labels_forward() {
+        let n = NameSlice::new(&["a", "b", "c"]);
+        let mut i = n.iter_labels();
+        assert_eq!(i.next(), Some(Label::from_slice("a".as_bytes()).unwrap()));
+        assert_eq!(i.next(), Some(Label::from_slice("b".as_bytes()).unwrap()));
+        assert_eq!(i.next(), Some(Label::from_slice("c".as_bytes()).unwrap()));
+        assert_eq!(i.next(), Some(Label::root()));
+        assert_eq!(i.next(), None);
+    }
+
+    #[test]
+    fn name_slice_iter_labels_backward() {
+        let n = NameSlice::new(&["a", "b", "c"]);
+        let mut i = n.iter_labels();
+        assert_eq!(i.next_back(), Some(Label::root()));
+        assert_eq!(
+            i.next_back(),
+            Some(Label::from_slice("c".as_bytes()).unwrap())
+        );
+        assert_eq!(
+            i.next_back(),
+            Some(Label::from_slice("b".as_bytes()).unwrap())
+        );
+        assert_eq!(
+            i.next_back(),
+            Some(Label::from_slice("a".as_bytes()).unwrap())
+        );
+        assert_eq!(i.next_back(), None);
+    }
+
+    #[test]
+    fn name_slice_iter_labels_both_directions() {
+        let n = NameSlice::new(&["a", "b", "c"]);
+        let mut i = n.iter_labels();
+        assert_eq!(i.next(), Some(Label::from_slice("a".as_bytes()).unwrap()));
+        assert_eq!(i.next_back(), Some(Label::root()));
+        assert_eq!(
+            i.next_back(),
+            Some(Label::from_slice("c".as_bytes()).unwrap())
+        );
+        assert_eq!(i.next(), Some(Label::from_slice("b".as_bytes()).unwrap()));
+        assert_eq!(i.next_back(), None);
+        assert_eq!(i.next(), None);
+    }
 }

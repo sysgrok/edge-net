@@ -564,7 +564,7 @@ impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize>
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use embassy_net::udp::PacketMetadata;
     use embassy_net::StackResources;
 
@@ -633,7 +633,7 @@ mod tests {
     #[test]
     fn socket_new_and_drop() {
         let mut resources = StackResources::<2>::new();
-        let (stack, _runner) = crate::tests::stack(&mut resources);
+        let (stack, _runner) = crate::test::stack(&mut resources);
 
         let pool = UdpBuffers::<1, 16, 16, 2>::new();
 

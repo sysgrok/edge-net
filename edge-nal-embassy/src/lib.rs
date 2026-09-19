@@ -171,7 +171,7 @@ pub(crate) fn to_emb_addr(addr: IpAddr) -> Option<IpAddress> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+pub(crate) mod test {
     use core::task::Context;
 
     use embassy_net::driver::{Capabilities, Driver, HardwareAddress, LinkState, RxToken, TxToken};

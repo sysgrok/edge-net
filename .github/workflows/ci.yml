@@ -44,6 +44,9 @@ jobs:
         run: cargo build --examples --features log
       - name: Build | Examples - defmt
         run: export DEFMT_LOG=trace; cargo check --examples --features std,defmt
+      - name: Test
+        # `edge-nal-embassy` needs a newer toolchain and is tested by the `embassy` job
+        run: cargo test --workspace --features std --exclude edge-nal-embassy
 
   embassy:
     name: Embassy / Requires Rust 1.91
@@ -67,3 +70,22 @@ jobs:
         run: cargo build --no-default-features --features embassy,defmt
       - name: Test | edge-nal-embassy
         run: cargo test -p edge-nal-embassy --all-features
+
+  miri:
+    name: Miri
+    # Runs the unit tests under Miri, to catch undefined behavior in the `unsafe` code
+    # (in particular, the `edge-nal-embassy` socket buffers pool).
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup | Checkout
+        uses: actions/checkout@v4
+      - name: Setup | Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: miri, rust-src
+      - name: Test | Miri
+        run: cargo miri test --workspace --features std --exclude edge-nal-embassy
+      - name: Test | Miri - edge-nal-embassy
+        run: cargo miri test -p edge-nal-embassy --all-features

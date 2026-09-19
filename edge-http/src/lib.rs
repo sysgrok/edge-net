@@ -1165,8 +1165,12 @@ pub mod ws {
 #[cfg(test)]
 mod test {
     use crate::{
-        ws::{sec_key_response, MAX_BASE64_KEY_RESPONSE_LEN},
-        BodyType, ConnectionType,
+        ws::{
+            is_upgrade_accepted, is_upgrade_request, sec_key_response, upgrade_request_headers,
+            upgrade_response_headers, UpgradeError, MAX_BASE64_KEY_LEN,
+            MAX_BASE64_KEY_RESPONSE_LEN,
+        },
+        BodyType, ConnectionType, Headers, Method, RequestHeaders, ResponseHeaders,
     };
 
     #[test]
@@ -1533,6 +1537,224 @@ mod test {
                 true
             )),
             BodyType::Raw
+        );
+    }
+
+    #[test]
+    fn test_method() {
+        assert_eq!(Method::new("get"), Some(Method::Get));
+        assert_eq!(Method::new("POST"), Some(Method::Post));
+        assert_eq!(Method::new("Patch"), Some(Method::Patch));
+        assert_eq!(Method::new("mkcol"), Some(Method::MkCol));
+        assert_eq!(Method::new("bogus"), None);
+        assert_eq!(Method::new(""), None);
+
+        // Methods render in their canonical upper-case form
+        let mut s = heapless::String::<16>::new();
+        core::fmt::Write::write_fmt(&mut s, format_args!("{}", Method::Propfind)).unwrap();
+        assert_eq!(s, "PROPFIND");
+    }
+
+    #[test]
+    fn test_headers() {
+        let mut headers = Headers::<8>::new();
+        assert!(headers.iter().next().is_none());
+        assert_eq!(headers.host(), None);
+
+        headers
+            .set("Host", "example.com")
+            .set("Content-Type", "text/plain");
+        assert_eq!(headers.host(), Some("example.com"));
+        assert_eq!(headers.get("host"), Some("example.com"));
+        assert_eq!(headers.content_type(), Some("text/plain"));
+        assert_eq!(headers.iter().count(), 2);
+
+        // Setting an existing header (case-insensitively) replaces it in place
+        headers.set("HOST", "other.org");
+        assert_eq!(headers.host(), Some("other.org"));
+        assert_eq!(headers.iter().count(), 2);
+        assert_eq!(headers.iter().next(), Some(("HOST", "other.org")));
+
+        // Removing compacts the remaining headers
+        headers.remove("host");
+        assert_eq!(headers.iter().count(), 1);
+        assert_eq!(headers.iter().next(), Some(("Content-Type", "text/plain")));
+        headers.remove("does-not-exist");
+        assert_eq!(headers.iter().count(), 1);
+
+        // Typed setters
+        let mut buf = heapless::String::new();
+        headers.set_content_len(42, &mut buf);
+        assert_eq!(headers.content_len(), Some(42));
+        headers.set_connection_close();
+        assert_eq!(headers.connection(), Some("Close"));
+        headers.set_transfer_encoding_chunked();
+        assert_eq!(headers.transfer_encoding(), Some("Chunked"));
+        assert_eq!(headers.iter().count(), 4);
+        headers.set_connection_keep_alive();
+        assert_eq!(headers.connection(), Some("Keep-Alive"));
+        headers.set_cache_control_no_cache();
+        assert_eq!(headers.cache_control(), Some("No-Cache"));
+
+        // Non-UTF-8 values are skipped by `iter` but visible via the raw accessors
+        let mut headers = Headers::<2>::new();
+        headers.set_raw("X-Bin", &[0xff, 0xfe]);
+        assert_eq!(headers.get("X-Bin"), None);
+        assert_eq!(headers.get_raw("x-bin"), Some(&[0xff, 0xfe][..]));
+        assert_eq!(headers.iter().count(), 0);
+        assert_eq!(headers.iter_raw().count(), 1);
+
+        // Setting an empty name removes instead
+        headers.set("", "");
+        assert_eq!(headers.iter_raw().count(), 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_headers_overflow() {
+        let mut headers = Headers::<1>::new();
+        headers.set("A", "1").set("B", "2");
+    }
+
+    #[test]
+    fn test_conn_body_headers() {
+        assert_eq!(
+            ConnectionType::from_header("connection", "close"),
+            Some(ConnectionType::Close)
+        );
+        assert_eq!(
+            ConnectionType::from_header("Connection", "keep-alive"),
+            Some(ConnectionType::KeepAlive)
+        );
+        assert_eq!(
+            ConnectionType::from_header("Connection", "Upgrade"),
+            Some(ConnectionType::Upgrade)
+        );
+        assert_eq!(ConnectionType::from_header("Other", "close"), None);
+        assert_eq!(ConnectionType::from_header("Connection", "other"), None);
+
+        // The last header wins
+        assert_eq!(
+            ConnectionType::from_headers([("Connection", "Close"), ("Connection", "Keep-Alive")]),
+            Some(ConnectionType::KeepAlive)
+        );
+        assert_eq!(ConnectionType::from_headers([("Host", "x")]), None);
+        assert_eq!(
+            ConnectionType::Close.raw_header(),
+            ("Connection", &b"Close"[..])
+        );
+
+        assert_eq!(
+            BodyType::from_header("transfer-encoding", "chunked"),
+            Some(BodyType::Chunked)
+        );
+        assert_eq!(
+            BodyType::from_header("Content-Length", "12"),
+            Some(BodyType::ContentLen(12))
+        );
+        assert_eq!(BodyType::from_header("Transfer-Encoding", "gzip"), None);
+        assert_eq!(BodyType::from_header("Content-Type", "12"), None);
+        assert_eq!(
+            BodyType::from_headers([("Content-Length", "1"), ("Transfer-Encoding", "Chunked")]),
+            Some(BodyType::Chunked)
+        );
+
+        let mut buf = heapless::String::new();
+        assert_eq!(
+            BodyType::Chunked.raw_header(&mut buf),
+            Some(("Transfer-Encoding", &b"Chunked"[..]))
+        );
+        assert_eq!(
+            BodyType::ContentLen(7).raw_header(&mut buf),
+            Some(("Content-Length", &b"7"[..]))
+        );
+        assert_eq!(BodyType::Raw.raw_header(&mut buf), None);
+    }
+
+    #[test]
+    fn test_ws_upgrade() {
+        let nonce = [1u8; 16];
+
+        let mut key_buf = [0u8; MAX_BASE64_KEY_LEN];
+        let request =
+            upgrade_request_headers(Some("example.com"), None, None, &nonce, &mut key_buf);
+        assert_eq!(request[0], ("Host", "example.com"));
+        assert_eq!(request[1], ("", ""));
+        assert_eq!(request[3], ("Connection", "Upgrade"));
+        assert_eq!(request[4], ("Upgrade", "websocket"));
+        assert_eq!(request[5], ("Sec-WebSocket-Version", "13"));
+        assert_eq!(
+            request[6],
+            ("Sec-WebSocket-Key", "AQEBAQEBAQEBAQEBAQEBAQ==")
+        );
+
+        assert!(is_upgrade_request(Method::Get, request));
+        assert!(!is_upgrade_request(Method::Post, request));
+        assert!(!is_upgrade_request(
+            Method::Get,
+            [("Connection", "Upgrade")]
+        ));
+
+        let mut resp_buf = [0u8; MAX_BASE64_KEY_RESPONSE_LEN];
+        let response = upgrade_response_headers(request, None, &mut resp_buf).unwrap();
+        assert_eq!(response[0], ("Content-Length", "0"));
+        assert_eq!(response[1], ("Connection", "Upgrade"));
+        assert_eq!(response[2], ("Upgrade", "websocket"));
+        assert_eq!(response[3].0, "Sec-WebSocket-Accept");
+
+        let mut accept_buf = [0u8; MAX_BASE64_KEY_RESPONSE_LEN];
+        assert!(is_upgrade_accepted(101, response, &nonce, &mut accept_buf));
+        assert!(!is_upgrade_accepted(200, response, &nonce, &mut accept_buf));
+        assert!(!is_upgrade_accepted(
+            101,
+            response,
+            &[2u8; 16],
+            &mut accept_buf
+        ));
+        assert!(!is_upgrade_accepted(
+            101,
+            [("Connection", "Upgrade")],
+            &nonce,
+            &mut accept_buf
+        ));
+
+        // The header wrapper types agree
+        let mut request_headers = RequestHeaders::<8>::new();
+        for (name, value) in request {
+            if !name.is_empty() {
+                request_headers.headers.set(name, value);
+            }
+        }
+        assert!(request_headers.is_ws_upgrade_request());
+
+        let mut response_headers = ResponseHeaders::<8>::new();
+        response_headers.code = 101;
+        for (name, value) in response {
+            response_headers.headers.set(name, value);
+        }
+        assert!(response_headers.is_ws_upgrade_accepted(&nonce, &mut accept_buf));
+        response_headers.code = 200;
+        assert!(!response_headers.is_ws_upgrade_accepted(&nonce, &mut accept_buf));
+
+        // Missing or unsupported version, missing key
+        let mut buf = [0u8; MAX_BASE64_KEY_RESPONSE_LEN];
+        assert_eq!(
+            upgrade_response_headers([("Sec-WebSocket-Key", "x")], None, &mut buf),
+            Err(UpgradeError::NoVersion)
+        );
+        let mut buf = [0u8; MAX_BASE64_KEY_RESPONSE_LEN];
+        assert_eq!(
+            upgrade_response_headers([("Sec-WebSocket-Version", "13")], None, &mut buf),
+            Err(UpgradeError::NoSecKey)
+        );
+        let mut buf = [0u8; MAX_BASE64_KEY_RESPONSE_LEN];
+        assert_eq!(
+            upgrade_response_headers(
+                [("Sec-WebSocket-Version", "8"), ("Sec-WebSocket-Key", "x")],
+                None,
+                &mut buf
+            ),
+            Err(UpgradeError::NoVersion)
         );
     }
 }

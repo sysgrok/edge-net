@@ -78,33 +78,36 @@ impl<'d> UdpSocket<'d> {
         stack: Stack<'d>,
         stack_buffers: &'d dyn DynPool<UdpSocketBuffers>,
     ) -> Result<Self, UdpError> {
-        let mut socket_buffers = stack_buffers.alloc().ok_or(UdpError::NoBuffers)?;
+        let socket_buffers = stack_buffers.alloc().ok_or(UdpError::NoBuffers)?;
 
+        // SAFETY: The buffers are exclusively owned by this socket until `free` is called from
+        // `Drop`, and the slices are built from the raw pointers (rather than from `&mut`
+        // references to their first element) so that they cover the whole buffers.
         Ok(Self {
             stack,
             socket: embassy_net::udp::UdpSocket::new(
                 stack,
                 unsafe {
                     core::slice::from_raw_parts_mut(
-                        socket_buffers.md_rx_buf.as_mut(),
+                        socket_buffers.md_rx_buf.as_ptr(),
                         socket_buffers.md_buf_len,
                     )
                 },
                 unsafe {
                     core::slice::from_raw_parts_mut(
-                        socket_buffers.rx_buf.as_mut(),
+                        socket_buffers.rx_buf.as_ptr(),
                         socket_buffers.rx_buf_len,
                     )
                 },
                 unsafe {
                     core::slice::from_raw_parts_mut(
-                        socket_buffers.md_tx_buf.as_mut(),
+                        socket_buffers.md_tx_buf.as_ptr(),
                         socket_buffers.md_buf_len,
                     )
                 },
                 unsafe {
                     core::slice::from_raw_parts_mut(
-                        socket_buffers.tx_buf.as_mut(),
+                        socket_buffers.tx_buf.as_ptr(),
                         socket_buffers.tx_buf_len,
                     )
                 },
@@ -510,22 +513,33 @@ impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize>
     SealedDynPool<UdpSocketBuffers> for UdpBuffers<N, TX_SZ, RX_SZ, M>
 {
     fn alloc(&self) -> Option<UdpSocketBuffers> {
-        let mut socket_buffers = Pool::alloc(self)?;
+        let socket_buffers = Pool::alloc(self)?;
 
-        let rx_buf = unsafe { &mut socket_buffers.as_mut().1 };
-        let tx_buf = unsafe { &mut socket_buffers.as_mut().0 };
-        let md_rx_buf = unsafe { &mut socket_buffers.as_mut().3 };
-        let md_tx_buf = unsafe { &mut socket_buffers.as_mut().2 };
+        // The buffers are addressed via raw pointers projected from the pool slot rather than via
+        // references to the slot as a whole: a reference to the whole slot would alias - and under
+        // the aliasing rules invalidate - the other buffers handed out from the same slot.
+        //
+        // SAFETY: `socket_buffers` points to a live slot of the pool.
+        let (tx_buf, rx_buf, md_tx_buf, md_rx_buf) = unsafe {
+            let slot = socket_buffers.as_ptr();
+
+            (
+                core::ptr::addr_of_mut!((*slot).0) as *mut u8,
+                core::ptr::addr_of_mut!((*slot).1) as *mut u8,
+                core::ptr::addr_of_mut!((*slot).2) as *mut PacketMetadata,
+                core::ptr::addr_of_mut!((*slot).3) as *mut PacketMetadata,
+            )
+        };
 
         Some(UdpSocketBuffers {
             token: socket_buffers.cast::<u8>(),
-            md_rx_buf: unwrap!(NonNull::new(md_rx_buf.as_mut_ptr())),
-            rx_buf: unwrap!(NonNull::new(rx_buf.as_mut_ptr())),
-            md_tx_buf: unwrap!(NonNull::new(md_tx_buf.as_mut_ptr())),
-            tx_buf: unwrap!(NonNull::new(tx_buf.as_mut_ptr())),
-            md_buf_len: md_rx_buf.len(),
-            rx_buf_len: rx_buf.len(),
-            tx_buf_len: tx_buf.len(),
+            md_rx_buf: unwrap!(NonNull::new(md_rx_buf)),
+            rx_buf: unwrap!(NonNull::new(rx_buf)),
+            md_tx_buf: unwrap!(NonNull::new(md_tx_buf)),
+            tx_buf: unwrap!(NonNull::new(tx_buf)),
+            md_buf_len: M,
+            rx_buf_len: RX_SZ,
+            tx_buf_len: TX_SZ,
         })
     }
 
@@ -547,4 +561,91 @@ impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize>
 impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize, const M: usize>
     DynPool<UdpSocketBuffers> for UdpBuffers<N, TX_SZ, RX_SZ, M>
 {
+}
+
+#[cfg(test)]
+mod tests {
+    use embassy_net::udp::PacketMetadata;
+    use embassy_net::StackResources;
+
+    use crate::sealed::SealedDynPool;
+
+    use super::{UdpBuffers, UdpSocket};
+
+    #[test]
+    fn buffers_alloc_free() {
+        let pool = UdpBuffers::<2, 8, 4, 2>::new();
+
+        let a = SealedDynPool::alloc(&pool).unwrap();
+        let b = SealedDynPool::alloc(&pool).unwrap();
+        assert!(SealedDynPool::alloc(&pool).is_none());
+
+        assert_eq!(a.tx_buf_len, 8);
+        assert_eq!(a.rx_buf_len, 4);
+        assert_eq!(a.md_buf_len, 2);
+
+        // SAFETY: the pointers come from live allocations of the pool, with the given lengths
+        unsafe {
+            let a_tx = core::slice::from_raw_parts_mut(a.tx_buf.as_ptr(), a.tx_buf_len);
+            let a_rx = core::slice::from_raw_parts_mut(a.rx_buf.as_ptr(), a.rx_buf_len);
+            let a_md_tx = core::slice::from_raw_parts_mut(a.md_tx_buf.as_ptr(), a.md_buf_len);
+            let a_md_rx = core::slice::from_raw_parts_mut(a.md_rx_buf.as_ptr(), a.md_buf_len);
+            let b_tx = core::slice::from_raw_parts_mut(b.tx_buf.as_ptr(), b.tx_buf_len);
+            let b_rx = core::slice::from_raw_parts_mut(b.rx_buf.as_ptr(), b.rx_buf_len);
+            let b_md_tx = core::slice::from_raw_parts_mut(b.md_tx_buf.as_ptr(), b.md_buf_len);
+            let b_md_rx = core::slice::from_raw_parts_mut(b.md_rx_buf.as_ptr(), b.md_buf_len);
+
+            // All eight buffers are live at the same time and must not overlap
+            a_tx.fill(1);
+            a_rx.fill(2);
+            a_md_tx.fill(PacketMetadata::EMPTY);
+            a_md_rx.fill(PacketMetadata::EMPTY);
+            b_tx.fill(3);
+            b_rx.fill(4);
+            b_md_tx.fill(PacketMetadata::EMPTY);
+            b_md_rx.fill(PacketMetadata::EMPTY);
+            assert!(a_tx.iter().all(|v| *v == 1));
+            assert!(a_rx.iter().all(|v| *v == 2));
+            assert!(b_tx.iter().all(|v| *v == 3));
+            assert!(b_rx.iter().all(|v| *v == 4));
+            assert_eq!(
+                a_md_tx.len() + a_md_rx.len() + b_md_tx.len() + b_md_rx.len(),
+                8
+            );
+
+            SealedDynPool::free(&pool, a.token);
+        }
+
+        // A freed slot is handed out again
+        let c = SealedDynPool::alloc(&pool).unwrap();
+        assert_eq!(c.token, a.token);
+        assert!(SealedDynPool::alloc(&pool).is_none());
+
+        // SAFETY: `b` and `c` are live allocations of the pool
+        unsafe {
+            SealedDynPool::free(&pool, b.token);
+            SealedDynPool::free(&pool, c.token);
+        }
+
+        assert!(SealedDynPool::alloc(&pool).is_some());
+    }
+
+    #[test]
+    fn socket_new_and_drop() {
+        let mut resources = StackResources::<2>::new();
+        let (stack, _runner) = crate::tests::stack(&mut resources);
+
+        let pool = UdpBuffers::<1, 16, 16, 2>::new();
+
+        let Ok(socket) = UdpSocket::new(stack, &pool) else {
+            panic!("socket creation failed");
+        };
+
+        // The only slot of the pool is taken by the socket
+        assert!(UdpSocket::new(stack, &pool).is_err());
+
+        // Dropping the socket returns its buffers to the pool
+        drop(socket);
+        assert!(UdpSocket::new(stack, &pool).is_ok());
+    }
 }

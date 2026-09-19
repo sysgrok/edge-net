@@ -237,3 +237,42 @@ fn map_result<T, E>(
         Err(_) => Err(WithTimeoutError::Timeout),
     }
 }
+
+#[cfg(test)]
+mod test {
+    use embassy_futures::block_on;
+
+    use super::{with_timeout, WithTimeout, WithTimeoutError};
+
+    #[test]
+    fn with_timeout_outcomes() {
+        block_on(async {
+            // Completes before the timeout
+            assert!(matches!(
+                with_timeout(1000, async { Ok::<_, ()>(5) }).await,
+                Ok(5)
+            ));
+
+            // Its own error is passed through
+            assert!(matches!(
+                with_timeout(1000, async { Err::<(), _>(7) }).await,
+                Err(WithTimeoutError::Error(7))
+            ));
+
+            // Never completes
+            assert!(matches!(
+                with_timeout(10, core::future::pending::<Result<(), ()>>()).await,
+                Err(WithTimeoutError::Timeout)
+            ));
+        });
+    }
+
+    #[test]
+    fn wrapper_accessors() {
+        let mut io = WithTimeout::new(250, 42_u32);
+        assert_eq!(io.timeout_ms(), 250);
+        assert_eq!(*io.io(), 42);
+        *io.io_mut() += 1;
+        assert_eq!(io.into_io(), 43);
+    }
+}

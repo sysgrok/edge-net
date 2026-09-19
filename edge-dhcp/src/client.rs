@@ -112,3 +112,129 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use core::net::Ipv4Addr;
+
+    use rand_core::{Infallible, TryRng};
+
+    use crate::{DhcpOption, MessageType, Options};
+
+    use super::Client;
+
+    /// A deterministic "random" number generator handing out consecutive numbers
+    struct Counter(u32);
+
+    impl TryRng for Counter {
+        type Error = Infallible;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            self.0 += 1;
+            Ok(self.0)
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            Ok(self.try_next_u32()? as u64)
+        }
+
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+            for byte in dest {
+                *byte = self.try_next_u32()? as u8;
+            }
+            Ok(())
+        }
+    }
+
+    const MAC: [u8; 6] = [1, 2, 3, 4, 5, 6];
+    const IP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 5);
+
+    #[test]
+    fn requests() {
+        let mut client = Client::new(Counter(0), MAC);
+
+        let mut buf = Options::buf();
+        let (discover, xid) = client.discover(&mut buf, 3, None);
+        assert_eq!(xid, 1);
+        assert_eq!(discover.xid, 1);
+        assert_eq!(discover.secs, 3);
+        assert!(discover.broadcast);
+        assert!(!discover.reply);
+        assert_eq!(&discover.chaddr[..6], &MAC);
+        assert!(discover.ciaddr.is_unspecified());
+        assert!(discover
+            .options
+            .iter()
+            .eq([DhcpOption::MessageType(MessageType::Discover)]));
+
+        let mut buf = Options::buf();
+        let (request, xid) = client.request(&mut buf, 0, IP, false);
+        assert_eq!(xid, 2);
+        assert!(!request.broadcast);
+        assert!(request.options.iter().eq([
+            DhcpOption::MessageType(MessageType::Request),
+            DhcpOption::RequestedIpAddress(IP),
+            DhcpOption::ParameterRequestList(&[
+                DhcpOption::CODE_ROUTER,
+                DhcpOption::CODE_SUBNET,
+                DhcpOption::CODE_DNS
+            ]),
+        ]));
+
+        let mut buf = Options::buf();
+        let release = client.release(&mut buf, 0, IP);
+        assert_eq!(release.ciaddr, IP);
+        assert!(release
+            .options
+            .iter()
+            .eq([DhcpOption::MessageType(MessageType::Release)]));
+
+        let mut buf = Options::buf();
+        let decline = client.decline(&mut buf, 0, IP);
+        assert_eq!(decline.ciaddr, IP);
+        assert!(decline
+            .options
+            .iter()
+            .eq([DhcpOption::MessageType(MessageType::Decline)]));
+    }
+
+    #[test]
+    fn reply_matching() {
+        let mut client = Client::new(Counter(0), MAC);
+
+        let mut buf = Options::buf();
+        let (discover, xid) = client.discover(&mut buf, 0, None);
+
+        let offer_opts = [DhcpOption::MessageType(MessageType::Offer)];
+        let offer = discover.new_reply(Some(IP), Options::new(&offer_opts));
+        assert!(client.is_offer(&offer, xid));
+        assert!(!client.is_ack(&offer, xid));
+        assert!(!client.is_nak(&offer, xid));
+        assert!(client.is_bootp_reply_for_us(&offer, xid, None));
+        assert!(client.is_bootp_reply_for_us(
+            &offer,
+            xid,
+            Some(&[MessageType::Ack, MessageType::Offer])
+        ));
+
+        // Wrong transaction ID, wrong MAC, or not a reply at all
+        assert!(!client.is_offer(&offer, xid + 1));
+        assert!(!client.is_bootp_reply_for_us(&discover, xid, None));
+        let other = Client::new(Counter(0), [9; 6]);
+        assert!(!other.is_offer(&offer, xid));
+
+        let ack_opts = [DhcpOption::MessageType(MessageType::Ack)];
+        let ack = discover.new_reply(Some(IP), Options::new(&ack_opts));
+        assert!(client.is_ack(&ack, xid));
+        assert!(!client.is_offer(&ack, xid));
+
+        let nak_opts = [DhcpOption::MessageType(MessageType::Nak)];
+        let nak = discover.new_reply(None, Options::new(&nak_opts));
+        assert!(client.is_nak(&nak, xid));
+
+        // A reply without a message type matches only when no type is expected
+        let reply = discover.new_reply(Some(IP), Options::new(&[]));
+        assert!(client.is_bootp_reply_for_us(&reply, xid, None));
+        assert!(!client.is_offer(&reply, xid));
+    }
+}

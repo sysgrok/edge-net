@@ -92,6 +92,12 @@ impl<T, const N: usize> Pool<T, N> {
     }
 }
 
+impl<T, const N: usize> Default for Pool<T, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T, const N: usize> Pool<T, N> {
     /// Allocate an object from the pool.
     ///
@@ -161,5 +167,146 @@ pub(crate) fn to_emb_addr(addr: IpAddr) -> Option<IpAddress> {
         IpAddr::V6(addr) => Some(addr.into()),
         #[allow(unreachable_patterns)]
         _ => None,
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use core::task::Context;
+
+    use embassy_net::driver::{Capabilities, Driver, HardwareAddress, LinkState, RxToken, TxToken};
+    use embassy_net::{
+        Config, Ipv4Address, Ipv4Cidr, Runner, Stack, StackResources, StaticConfigV4,
+    };
+
+    use super::Pool;
+
+    /// A no-op `defmt` logger, so that the tests link when the `defmt` feature is enabled.
+    #[cfg(feature = "defmt")]
+    mod defmt_logger {
+        #[defmt::global_logger]
+        struct Logger;
+
+        unsafe impl defmt::Logger for Logger {
+            fn acquire() {}
+            unsafe fn flush() {}
+            unsafe fn release() {}
+            unsafe fn write(_bytes: &[u8]) {}
+        }
+
+        #[defmt::panic_handler]
+        fn panic() -> ! {
+            core::panic!("defmt panic")
+        }
+
+        defmt::timestamp!("{=u64:us}", 0);
+    }
+
+    /// A network driver that never sends or receives anything.
+    ///
+    /// Used to construct a `Stack` for the socket tests, which only exercise
+    /// the socket buffers management and never actually communicate.
+    pub(crate) struct DummyDriver;
+
+    /// A token type that is never constructed, as `DummyDriver` never produces any tokens.
+    pub(crate) enum Never {}
+
+    impl RxToken for Never {
+        fn consume<R, F>(self, _f: F) -> R
+        where
+            F: FnOnce(&mut [u8]) -> R,
+        {
+            match self {}
+        }
+    }
+
+    impl TxToken for Never {
+        fn consume<R, F>(self, _len: usize, _f: F) -> R
+        where
+            F: FnOnce(&mut [u8]) -> R,
+        {
+            match self {}
+        }
+    }
+
+    impl Driver for DummyDriver {
+        type RxToken<'a> = Never;
+        type TxToken<'a> = Never;
+
+        fn receive(&mut self, _cx: &mut Context) -> Option<(Never, Never)> {
+            None
+        }
+
+        fn transmit(&mut self, _cx: &mut Context) -> Option<Never> {
+            None
+        }
+
+        fn link_state(&mut self, _cx: &mut Context) -> LinkState {
+            LinkState::Down
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            let mut caps = Capabilities::default();
+            caps.max_transmission_unit = 1514;
+
+            caps
+        }
+
+        fn hardware_address(&self) -> HardwareAddress {
+            HardwareAddress::Ethernet([2, 0, 0, 0, 0, 1])
+        }
+    }
+
+    /// Create a `Stack` backed by `DummyDriver`, for the socket tests.
+    pub(crate) fn stack<const SOCK: usize>(
+        resources: &mut StackResources<SOCK>,
+    ) -> (Stack<'_>, Runner<'_, DummyDriver>) {
+        embassy_net::new(
+            DummyDriver,
+            Config::ipv4_static(StaticConfigV4 {
+                address: Ipv4Cidr::new(Ipv4Address::new(10, 0, 0, 1), 24),
+                gateway: None,
+                dns_servers: Default::default(),
+            }),
+            resources,
+            0,
+        )
+    }
+
+    #[test]
+    fn pool_alloc_free() {
+        let pool = Pool::<u32, 2>::new();
+
+        let a = pool.alloc().unwrap();
+        let b = pool.alloc().unwrap();
+        assert!(pool.alloc().is_none());
+        assert_ne!(a, b);
+
+        // SAFETY: both slots are allocated and nothing else references them
+        unsafe {
+            a.as_ptr().write(1);
+            b.as_ptr().write(2);
+            assert_eq!(a.as_ptr().read(), 1);
+            assert_eq!(b.as_ptr().read(), 2);
+
+            pool.free(a);
+        }
+
+        // A freed slot is handed out again, with the other slot still allocated
+        let c = pool.alloc().unwrap();
+        assert_eq!(c, a);
+        assert!(pool.alloc().is_none());
+
+        // SAFETY: `b` and `c` are allocated
+        unsafe {
+            assert_eq!(b.as_ptr().read(), 2);
+
+            pool.free(b);
+            pool.free(c);
+        }
+
+        assert!(pool.alloc().is_some());
+        assert!(pool.alloc().is_some());
+        assert!(pool.alloc().is_none());
     }
 }

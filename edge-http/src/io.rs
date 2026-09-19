@@ -1302,10 +1302,33 @@ mod raw {
 }
 
 #[cfg(test)]
+#[allow(clippy::large_futures)]
 mod test {
-    use embedded_io_async::{ErrorType, Read};
+    use core::convert::Infallible;
+
+    use embassy_futures::block_on;
+    use embedded_io_async::{ErrorType, Read, Write};
 
     use super::*;
+
+    struct SliceWrite<'a>(&'a mut [u8], usize);
+
+    impl ErrorType for SliceWrite<'_> {
+        type Error = Infallible;
+    }
+
+    impl Write for SliceWrite<'_> {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            self.0[self.1..self.1 + buf.len()].copy_from_slice(buf);
+            self.1 += buf.len();
+
+            Ok(buf.len())
+        }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
 
     struct SliceRead<'a>(&'a [u8]);
 
@@ -1342,6 +1365,256 @@ mod test {
         expect(b"h\r\n", None);
         expect(b"\r\na", None);
         expect(b"4\r\nabcdefg", None);
+    }
+
+    #[test]
+    fn test_request_headers_roundtrip() {
+        block_on(async {
+            let mut out = [0u8; 256];
+            let mut w = SliceWrite(&mut out, 0);
+
+            let mut request = RequestHeaders::<8>::new();
+            request.method = Method::Post;
+            request.path = "/api?x=1";
+            request.headers.set("Host", "example.com");
+            let mut len_buf = heapless::String::new();
+            request.headers.set_content_len(5, &mut len_buf);
+
+            let (connection_type, body_type) = request.send(false, &mut w).await.unwrap();
+            assert_eq!(connection_type, ConnectionType::KeepAlive);
+            assert_eq!(body_type, BodyType::ContentLen(5));
+
+            let len = w.1;
+            assert_eq!(
+                &out[..len],
+                &b"POST /api?x=1 HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\nConnection: Keep-Alive\r\n\r\n"[..]
+            );
+
+            // Parse it back, with the body following the headers in the same stream
+            let mut input = [0u8; 300];
+            input[..len].copy_from_slice(&out[..len]);
+            input[len..len + 5].copy_from_slice(b"hello");
+
+            let mut buf = [0u8; 300];
+            let mut parsed = RequestHeaders::<8>::new();
+            let (body_buf, read_len) = parsed
+                .receive(&mut buf, SliceRead(&input[..len + 5]), false)
+                .await
+                .unwrap();
+            assert_eq!(parsed.method, Method::Post);
+            assert_eq!(parsed.path, "/api?x=1");
+            assert!(parsed.http11);
+            assert_eq!(parsed.headers.host(), Some("example.com"));
+            assert_eq!(parsed.headers.content_len(), Some(5));
+            assert_eq!(&body_buf[..read_len], b"hello");
+
+            let (connection_type, body_type) = parsed.resolve::<Infallible>().unwrap();
+            assert_eq!(connection_type, ConnectionType::KeepAlive);
+            assert_eq!(body_type, BodyType::ContentLen(5));
+
+            let mut body = Body::new(body_type, body_buf, read_len, SliceRead(&[]));
+            let mut data = [0u8; 8];
+            let n = body.read(&mut data).await.unwrap();
+            assert_eq!(&data[..n], b"hello");
+            assert!(body.is_complete());
+            assert!(!body.needs_close());
+            assert_eq!(body.read(&mut data).await.unwrap(), 0);
+        })
+    }
+
+    #[test]
+    fn test_request_headers_defaults() {
+        block_on(async {
+            // A request without body headers gets an explicit zero content length,
+            // or is upgraded to chunked when asked to
+            let mut out = [0u8; 128];
+            let mut w = SliceWrite(&mut out, 0);
+            let request = RequestHeaders::<8>::new();
+            let (_, body_type) = request.send(false, &mut w).await.unwrap();
+            assert_eq!(body_type, BodyType::ContentLen(0));
+            let len = w.1;
+            assert_eq!(
+                &out[..len],
+                &b"GET / HTTP/1.1\r\nConnection: Keep-Alive\r\nContent-Length: 0\r\n\r\n"[..]
+            );
+
+            let mut out = [0u8; 128];
+            let mut w = SliceWrite(&mut out, 0);
+            let (_, body_type) = request.send(true, &mut w).await.unwrap();
+            assert_eq!(body_type, BodyType::Chunked);
+            let len = w.1;
+            assert_eq!(
+                &out[..len],
+                &b"GET / HTTP/1.1\r\nConnection: Keep-Alive\r\nTransfer-Encoding: Chunked\r\n\r\n"
+                    [..]
+            );
+
+            // HTTP/1.0 defaults to a closed connection
+            let mut out = [0u8; 128];
+            let mut w = SliceWrite(&mut out, 0);
+            let mut request = RequestHeaders::<8>::new();
+            request.http11 = false;
+            let (connection_type, _) = request.send(true, &mut w).await.unwrap();
+            assert_eq!(connection_type, ConnectionType::Close);
+            let len = w.1;
+            assert!(out[..len].starts_with(b"GET / HTTP/1.0\r\nConnection: Close\r\n"));
+        })
+    }
+
+    #[test]
+    fn test_response_headers_receive() {
+        block_on(async {
+            let input =
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc";
+
+            let mut buf = [0u8; 128];
+            let mut response = ResponseHeaders::<8>::new();
+            let (body_buf, read_len) = response
+                .receive(&mut buf, SliceRead(input), false)
+                .await
+                .unwrap();
+            assert!(response.http11);
+            assert_eq!(response.code, 404);
+            assert_eq!(response.reason, Some("Not Found"));
+            assert_eq!(response.headers.content_len(), Some(3));
+            assert_eq!(&body_buf[..read_len], b"abc");
+            assert_eq!(
+                response
+                    .resolve::<Infallible>(ConnectionType::KeepAlive)
+                    .unwrap(),
+                (ConnectionType::Close, BodyType::ContentLen(3))
+            );
+
+            // An HTTP/1.0 response without body headers to a `Close` request
+            // is a raw body until the connection closes
+            let input = b"HTTP/1.0 200 OK\r\n\r\nraw";
+            let mut buf = [0u8; 128];
+            let mut response = ResponseHeaders::<8>::new();
+            let (body_buf, read_len) = response
+                .receive(&mut buf, SliceRead(input), false)
+                .await
+                .unwrap();
+            assert!(!response.http11);
+            assert_eq!(response.code, 200);
+            assert_eq!(
+                response
+                    .resolve::<Infallible>(ConnectionType::Close)
+                    .unwrap(),
+                (ConnectionType::Close, BodyType::Raw)
+            );
+            // ...but a body-less HTTP/1.0 response to a `Keep-Alive` request is a mismatch
+            assert!(response
+                .resolve::<Infallible>(ConnectionType::KeepAlive)
+                .is_err());
+            let mut body = Body::new(BodyType::Raw, body_buf, read_len, SliceRead(b"!"));
+            assert!(body.needs_close());
+            let mut data = [0u8; 8];
+            let mut total = 0;
+            loop {
+                let n = body.read(&mut data[total..]).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                total += n;
+            }
+            assert_eq!(&data[..total], b"raw!");
+
+            // Garbage is rejected
+            let mut buf = [0u8; 128];
+            let mut response = ResponseHeaders::<8>::new();
+            assert!(response
+                .receive(&mut buf, SliceRead(b"garbage\r\n\r\n"), false)
+                .await
+                .is_err());
+        })
+    }
+
+    #[test]
+    fn test_body_readers() {
+        block_on(async {
+            // A content-length body spanning the already-read buffer and the input
+            let mut buf = *b"hel";
+            let mut body = Body::new(
+                BodyType::ContentLen(8),
+                &mut buf,
+                3,
+                SliceRead(b"lo!!!extra"),
+            );
+            assert!(!body.is_complete());
+            let mut data = [0u8; 16];
+            let mut total = 0;
+            while !body.is_complete() {
+                total += body.read(&mut data[total..]).await.unwrap();
+            }
+            assert_eq!(&data[..total], b"hello!!!");
+            assert_eq!(body.read(&mut data).await.unwrap(), 0);
+            assert!(!body.needs_close());
+
+            // A chunked body spanning the buffer and the input
+            let mut buf = [0u8; 32];
+            buf[..4].copy_from_slice(b"3\r\nh");
+            let mut body = Body::new(
+                BodyType::Chunked,
+                &mut buf,
+                4,
+                SliceRead(b"el\r\n2\r\nlo\r\n0\r\n\r\n"),
+            );
+            let mut data = [0u8; 16];
+            let mut total = 0;
+            loop {
+                let n = body.read(&mut data[total..]).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                total += n;
+            }
+            assert_eq!(&data[..total], b"hello");
+            assert!(body.is_complete());
+        })
+    }
+
+    #[test]
+    fn test_send_body() {
+        block_on(async {
+            // Chunked
+            let mut out = [0u8; 64];
+            let mut w = SliceWrite(&mut out, 0);
+            let mut body = SendBody::new(BodyType::Chunked, &mut w);
+            body.write_all(b"hello").await.unwrap();
+            body.write_all(b"").await.unwrap();
+            body.finish().await.unwrap();
+            assert!(body.is_complete());
+            assert!(!body.needs_close());
+            assert!(matches!(body.write(b"x").await, Err(Error::InvalidState)));
+            let len = body.release().1;
+            assert_eq!(&out[..len], b"5\r\nhello\r\n0\r\n\r\n");
+
+            // Content length
+            let mut out = [0u8; 64];
+            let mut w = SliceWrite(&mut out, 0);
+            let mut body = SendBody::new(BodyType::ContentLen(5), &mut w);
+            body.write_all(b"hel").await.unwrap();
+            assert!(!body.is_complete());
+            assert!(body.needs_close());
+            assert!(matches!(body.finish().await, Err(Error::IncompleteBody)));
+            assert!(matches!(body.write(b"lo!").await, Err(Error::TooLongBody)));
+            body.write_all(b"lo").await.unwrap();
+            assert!(body.is_complete());
+            body.finish().await.unwrap();
+            let len = body.release().1;
+            assert_eq!(&out[..len], b"hello");
+
+            // Raw
+            let mut out = [0u8; 64];
+            let mut w = SliceWrite(&mut out, 0);
+            let mut body = SendBody::new(BodyType::Raw, &mut w);
+            body.write_all(b"raw").await.unwrap();
+            assert!(body.is_complete());
+            assert!(body.needs_close());
+            body.finish().await.unwrap();
+            let len = body.release().1;
+            assert_eq!(&out[..len], b"raw");
+        })
     }
 
     fn expect(input: &[u8], expected: Option<&[u8]>) {

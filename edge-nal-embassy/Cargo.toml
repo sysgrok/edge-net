@@ -37,3 +37,7 @@ embedded-io-async = { workspace = true }
 edge-nal = { workspace = true }
 embassy-net = { workspace = true }
 embassy-futures = { workspace = true }
+
+[dev-dependencies]
+# The socket tests construct an `embassy-net` stack, which needs a time driver
+embassy-time = { workspace = true, features = ["std", "generic-queue-64"] }

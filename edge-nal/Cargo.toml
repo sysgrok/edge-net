@@ -17,3 +17,8 @@ categories = [
 [dependencies]
 embedded-io-async = { workspace = true }
 embassy-time = { workspace = true }
+
+[dev-dependencies]
+# The timeout tests need a time driver and an executor
+embassy-time = { workspace = true, features = ["std", "generic-queue-64"] }
+embassy-futures = { workspace = true }

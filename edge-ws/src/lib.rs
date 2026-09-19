@@ -352,3 +352,184 @@ impl defmt::Format for FrameHeader {
         )
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::{Error, FrameHeader, FrameType};
+
+    fn roundtrip(
+        frame_type: FrameType,
+        payload_len: u64,
+        mask_key: Option<u32>,
+        expected_len: usize,
+    ) {
+        let header = FrameHeader {
+            frame_type,
+            payload_len,
+            mask_key,
+        };
+        assert_eq!(header.serialized_len(), expected_len);
+
+        let mut buf = [0xaa_u8; FrameHeader::MAX_LEN];
+        assert_eq!(header.serialize(&mut buf), Ok(expected_len));
+
+        let (decoded, offset) = FrameHeader::deserialize(&buf[..expected_len]).unwrap();
+        assert_eq!(offset, expected_len);
+        assert_eq!(decoded.frame_type, frame_type);
+        assert_eq!(decoded.payload_len, payload_len);
+        assert_eq!(decoded.mask_key, mask_key);
+
+        // Trailing payload bytes do not affect the header
+        let (decoded, offset) = FrameHeader::deserialize(&buf).unwrap();
+        assert_eq!(offset, expected_len);
+        assert_eq!(decoded.payload_len, payload_len);
+    }
+
+    #[test]
+    fn header_roundtrips() {
+        roundtrip(FrameType::Text(false), 0, None, 2);
+        roundtrip(FrameType::Text(true), 125, None, 2);
+        roundtrip(FrameType::Binary(true), 125, Some(0xdead_beef), 6);
+        roundtrip(FrameType::Binary(false), 126, None, 4);
+        roundtrip(FrameType::Ping, 300, Some(1), 8);
+        roundtrip(FrameType::Pong, 65535, None, 4);
+        roundtrip(FrameType::Close, 65536, None, 10);
+        roundtrip(FrameType::Continue(true), 1 << 40, Some(u32::MAX), 14);
+        roundtrip(FrameType::Continue(false), 5, None, 2);
+    }
+
+    #[test]
+    fn wire_format() {
+        // A final, unmasked text frame with a 5-byte payload
+        let header = FrameHeader {
+            frame_type: FrameType::Text(false),
+            payload_len: 5,
+            mask_key: None,
+        };
+        let mut buf = [0u8; 2];
+        assert_eq!(header.serialize(&mut buf), Ok(2));
+        assert_eq!(buf, [0x81, 0x05]);
+
+        // A fragmented, masked binary frame with a 16-bit payload length
+        let header = FrameHeader {
+            frame_type: FrameType::Binary(true),
+            payload_len: 300,
+            mask_key: Some(0x0102_0304),
+        };
+        let mut buf = [0u8; 8];
+        assert_eq!(header.serialize(&mut buf), Ok(8));
+        assert_eq!(buf, [0x02, 0x80 | 126, 0x01, 0x2c, 1, 2, 3, 4]);
+
+        // A close frame with a 64-bit payload length
+        let header = FrameHeader {
+            frame_type: FrameType::Close,
+            payload_len: 0x0001_0000_0000,
+            mask_key: None,
+        };
+        let mut buf = [0u8; 10];
+        assert_eq!(header.serialize(&mut buf), Ok(10));
+        assert_eq!(buf, [0x88, 127, 0, 0, 0, 1, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn deserialize_errors() {
+        assert!(matches!(
+            FrameHeader::deserialize(&[]),
+            Err(Error::Incomplete(2))
+        ));
+        assert!(matches!(
+            FrameHeader::deserialize(&[0x81]),
+            Err(Error::Incomplete(1))
+        ));
+        assert!(matches!(
+            FrameHeader::deserialize(&[0x81, 126, 0]),
+            Err(Error::Incomplete(1))
+        ));
+        assert!(matches!(
+            FrameHeader::deserialize(&[0x81, 127, 0, 0]),
+            Err(Error::Incomplete(6))
+        ));
+        assert!(matches!(
+            FrameHeader::deserialize(&[0x81, 0x85, 1, 2]),
+            Err(Error::Incomplete(2))
+        ));
+
+        // Reserved bits and reserved opcodes are rejected
+        assert!(matches!(
+            FrameHeader::deserialize(&[0xc1, 0]),
+            Err(Error::Invalid)
+        ));
+        assert!(matches!(
+            FrameHeader::deserialize(&[0x83, 0]),
+            Err(Error::Invalid)
+        ));
+        assert!(matches!(
+            FrameHeader::deserialize(&[0x8b, 0]),
+            Err(Error::Invalid)
+        ));
+
+        // Serialization needs a buffer of at least `serialized_len` bytes
+        let header = FrameHeader {
+            frame_type: FrameType::Binary(true),
+            payload_len: 300,
+            mask_key: Some(1),
+        };
+        assert_eq!(header.serialize(&mut [0u8; 7]), Err(Error::InvalidLen));
+    }
+
+    #[test]
+    fn masking() {
+        let mut data = *b"hello world";
+
+        FrameHeader::mask_with(&mut data, Some(0x0102_0304), 0);
+        assert_eq!(data[0], b'h' ^ 1);
+        assert_eq!(data[1], b'e' ^ 2);
+        assert_eq!(data[3], b'l' ^ 4);
+        assert_eq!(data[4], b'o' ^ 1);
+
+        // Masking is symmetric
+        FrameHeader::mask_with(&mut data, Some(0x0102_0304), 0);
+        assert_eq!(&data, b"hello world");
+
+        // The payload offset selects the starting mask byte
+        FrameHeader::mask_with(&mut data[1..], Some(0x0102_0304), 1);
+        assert_eq!(data[0], b'h');
+        assert_eq!(data[1], b'e' ^ 2);
+        FrameHeader::mask_with(&mut data[1..], Some(0x0102_0304), 1);
+        assert_eq!(&data, b"hello world");
+
+        // Without a key, masking is a no-op
+        FrameHeader::mask_with(&mut data, None, 0);
+        assert_eq!(&data, b"hello world");
+
+        // `mask` uses the key from the header
+        let header = FrameHeader {
+            frame_type: FrameType::Text(false),
+            payload_len: 11,
+            mask_key: Some(0xff00_0000),
+        };
+        header.mask(&mut data, 0);
+        assert_eq!(data[0], b'h' ^ 0xff);
+        assert_eq!(data[1], b'e');
+    }
+
+    #[test]
+    fn frame_type_flags() {
+        assert!(!FrameType::Text(false).is_fragmented());
+        assert!(FrameType::Text(false).is_final());
+        assert!(FrameType::Binary(true).is_fragmented());
+        assert!(!FrameType::Binary(true).is_final());
+        assert!(FrameType::Continue(false).is_fragmented());
+        assert!(!FrameType::Continue(false).is_final());
+        assert!(FrameType::Continue(true).is_fragmented());
+        assert!(FrameType::Continue(true).is_final());
+
+        for frame_type in [FrameType::Ping, FrameType::Pong, FrameType::Close] {
+            assert!(!frame_type.is_fragmented());
+            assert!(frame_type.is_final());
+        }
+
+        assert_eq!(FrameHeader::MIN_LEN, 2);
+        assert_eq!(FrameHeader::MAX_LEN, 14);
+    }
+}

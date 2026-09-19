@@ -796,13 +796,14 @@ enum Ipv4AddrsInner<'a> {
 impl<'a> Ipv4AddrsInner<'a> {
     fn iter(&self) -> impl Iterator<Item = Ipv4Addr> + 'a {
         match self {
-            // `chunks_exact` rather than a `step_by(4)` indexing, so that a data slice
-            // with a length which is not a multiple of 4 cannot panic
-            Self::ByteSlice(data) => EitherIterator::First(data.chunks_exact(4).map(|octets| {
-                let octets: [u8; 4] = unwrap!(octets.try_into());
-
-                octets.into()
-            })),
+            // `as_chunks` rather than a `step_by(4)` indexing, so that a data slice
+            // with a length which is not a multiple of 4 cannot panic (the remainder is ignored)
+            Self::ByteSlice(data) => EitherIterator::First(
+                data.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|octets| Ipv4Addr::from(*octets)),
+            ),
             Self::DataSlice(data) => EitherIterator::Second(data.iter().cloned()),
         }
     }
@@ -849,7 +850,7 @@ const CAPTIVE_URL: u8 = 114;
 mod test {
     use edge_raw::bytes::BytesOut;
 
-    use super::{DhcpOption, Ipv4Addr, Ipv4Addrs, MessageType, Options, Packet};
+    use super::{DhcpOption, Error, Ipv4Addr, Ipv4Addrs, MessageType, Options, Packet, Settings};
 
     /// A `Router` / `DomainNameServer` option carries all of its addresses
     /// under a single length byte, rather than one length byte per address
@@ -1001,5 +1002,285 @@ mod test {
                 assert_eq!(Packet::decode(data), Err(super::Error::InvalidPacket));
             }
         }
+    }
+
+    /// A request encodes to the minimum BOOTP size and decodes back to itself
+    #[test]
+    fn test_request_roundtrip() {
+        let mac = [1, 2, 3, 4, 5, 6];
+        let mut opt_buf = Options::buf();
+        let request = Packet::new_request(
+            mac,
+            0xdead_beef,
+            7,
+            None,
+            true,
+            Options::discover(Some(Ipv4Addr::new(10, 0, 0, 9)), &mut opt_buf),
+        );
+
+        assert!(!request.reply);
+        assert_eq!(request.xid, 0xdead_beef);
+        assert_eq!(request.secs, 7);
+        assert!(request.broadcast);
+        assert_eq!(&request.chaddr[..6], &mac);
+        assert_eq!(&request.chaddr[6..], &[0; 10]);
+        assert!(request.ciaddr.is_unspecified());
+
+        let mut buf = [0; 512];
+        let data = request.encode(&mut buf).unwrap();
+        assert_eq!(data.len(), 272);
+
+        let decoded = Packet::decode(data).unwrap();
+        assert_eq!(decoded.reply, request.reply);
+        assert_eq!(decoded.xid, request.xid);
+        assert_eq!(decoded.secs, request.secs);
+        assert_eq!(decoded.broadcast, request.broadcast);
+        assert_eq!(decoded.chaddr, request.chaddr);
+        assert!(decoded.options.iter().eq(request.options.iter()));
+    }
+
+    /// Replies are "for us" only when the MAC, the transaction ID and the reply flag all match
+    #[test]
+    fn test_is_for_us() {
+        let mac = [1, 2, 3, 4, 5, 6];
+        let ip = Ipv4Addr::new(10, 0, 0, 9);
+
+        let mut opt_buf = Options::buf();
+        let request = Packet::new_request(
+            mac,
+            42,
+            0,
+            None,
+            false,
+            Options::discover(None, &mut opt_buf),
+        );
+        assert!(!request.is_for_us(&mac, 42));
+
+        let reply_opts = [DhcpOption::MessageType(MessageType::Offer)];
+        let reply = request.new_reply(Some(ip), Options::new(&reply_opts));
+        assert!(reply.reply);
+        assert_eq!(reply.xid, 42);
+        assert_eq!(reply.yiaddr, ip);
+        assert!(reply.ciaddr.is_unspecified());
+        assert!(reply.is_for_us(&mac, 42));
+        assert!(!reply.is_for_us(&mac, 43));
+        assert!(!reply.is_for_us(&[6, 5, 4, 3, 2, 1], 42));
+
+        // A reply to a `Request` echoes the client address
+        let mut opt_buf = Options::buf();
+        let request = Packet::new_request(
+            mac,
+            42,
+            0,
+            Some(ip),
+            false,
+            Options::request(ip, &mut opt_buf),
+        );
+        let reply = request.new_reply(Some(ip), Options::new(&reply_opts));
+        assert_eq!(reply.ciaddr, ip);
+    }
+
+    /// Malformed packets are rejected with the matching error
+    #[test]
+    fn test_decode_errors() {
+        let mut opt_buf = Options::buf();
+        let request = Packet::new_request(
+            [1; 6],
+            1,
+            0,
+            None,
+            false,
+            Options::discover(None, &mut opt_buf),
+        );
+
+        let mut buf = [0; 512];
+        let len = request.encode(&mut buf).unwrap().len();
+
+        // Truncated
+        assert_eq!(
+            Packet::decode(&buf[..100]).err(),
+            Some(Error::DataUnderflow)
+        );
+
+        // Wrong hardware address length
+        let mut data = buf;
+        data[2] = 4;
+        assert_eq!(Packet::decode(&data[..len]).err(), Some(Error::InvalidHlen));
+
+        // Missing magic cookie
+        let mut data = buf;
+        data[236] = 0;
+        assert_eq!(
+            Packet::decode(&data[..len]).err(),
+            Some(Error::MissingCookie)
+        );
+
+        // Encoding needs room for the whole minimum-size packet
+        assert_eq!(
+            request.encode(&mut [0; 100]).err(),
+            Some(Error::BufferOverflow)
+        );
+    }
+
+    /// The option builders produce exactly the options the protocol expects
+    #[test]
+    fn test_options_builders() {
+        let ip = Ipv4Addr::new(10, 0, 0, 5);
+
+        let mut buf = Options::buf();
+        assert!(Options::discover(None, &mut buf)
+            .iter()
+            .eq([DhcpOption::MessageType(MessageType::Discover)]));
+
+        let mut buf = Options::buf();
+        assert!(Options::discover(Some(ip), &mut buf).iter().eq([
+            DhcpOption::MessageType(MessageType::Discover),
+            DhcpOption::RequestedIpAddress(ip)
+        ]));
+
+        let mut buf = Options::buf();
+        assert!(Options::request(ip, &mut buf).iter().eq([
+            DhcpOption::MessageType(MessageType::Request),
+            DhcpOption::RequestedIpAddress(ip),
+            DhcpOption::ParameterRequestList(&[
+                DhcpOption::CODE_ROUTER,
+                DhcpOption::CODE_SUBNET,
+                DhcpOption::CODE_DNS
+            ]),
+        ]));
+
+        let mut buf = Options::buf();
+        assert!(Options::release(&mut buf)
+            .iter()
+            .eq([DhcpOption::MessageType(MessageType::Release)]));
+
+        let mut buf = Options::buf();
+        assert!(Options::decline(&mut buf)
+            .iter()
+            .eq([DhcpOption::MessageType(MessageType::Decline)]));
+    }
+
+    /// A reply carries the base options plus the requested parameters the server can provide
+    #[test]
+    fn test_options_reply() {
+        let ip = Ipv4Addr::new(10, 0, 0, 5);
+        let server = Ipv4Addr::new(10, 0, 0, 1);
+        let gateways = [Ipv4Addr::new(10, 0, 0, 1)];
+        let dns = [Ipv4Addr::new(8, 8, 8, 8), Ipv4Addr::new(1, 1, 1, 1)];
+
+        let mut req_buf = Options::buf();
+        let request = Options::request(ip, &mut req_buf);
+
+        let mut buf = Options::buf();
+        let ack = request.reply(
+            MessageType::Ack,
+            server,
+            3600,
+            &gateways,
+            None,
+            &dns,
+            Some("http://portal"),
+            &mut buf,
+        );
+        assert!(ack.iter().eq([
+            DhcpOption::MessageType(MessageType::Ack),
+            DhcpOption::ServerIdentifier(server),
+            DhcpOption::IpAddressLeaseTime(3600),
+            DhcpOption::Router(Ipv4Addrs::new(&gateways)),
+            DhcpOption::DomainNameServer(Ipv4Addrs::new(&dns)),
+        ]));
+
+        // A NAK carries no configuration
+        let mut buf = Options::buf();
+        let nak = request.reply(
+            MessageType::Nak,
+            server,
+            3600,
+            &gateways,
+            Some(Ipv4Addr::new(255, 255, 255, 0)),
+            &dns,
+            None,
+            &mut buf,
+        );
+        assert_eq!(nak.iter().count(), 3);
+
+        // Parameters that were not requested are not sent
+        let mut disc_buf = Options::buf();
+        let discover = Options::discover(None, &mut disc_buf);
+        let mut buf = Options::buf();
+        let offer = discover.reply(
+            MessageType::Offer,
+            server,
+            3600,
+            &gateways,
+            Some(Ipv4Addr::new(255, 255, 255, 0)),
+            &dns,
+            None,
+            &mut buf,
+        );
+        assert_eq!(offer.iter().count(), 3);
+    }
+
+    /// `Settings` picks the first router and the first two DNS servers from a reply
+    #[test]
+    fn test_settings() {
+        let ip = Ipv4Addr::new(10, 0, 0, 5);
+        let server = Ipv4Addr::new(10, 0, 0, 1);
+        let gateways = [Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)];
+        let dns = [
+            Ipv4Addr::new(8, 8, 8, 8),
+            Ipv4Addr::new(1, 1, 1, 1),
+            Ipv4Addr::new(9, 9, 9, 9),
+        ];
+
+        let mut req_buf = Options::buf();
+        let request =
+            Packet::new_request([1; 6], 1, 0, None, true, Options::request(ip, &mut req_buf));
+
+        let mut buf = Options::buf();
+        let ack = request.new_reply(
+            Some(ip),
+            request.options.reply(
+                MessageType::Ack,
+                server,
+                3600,
+                &gateways,
+                Some(Ipv4Addr::new(255, 255, 255, 0)),
+                &dns,
+                Some("http://portal"),
+                &mut buf,
+            ),
+        );
+
+        let settings = Settings::new(&ack);
+        assert_eq!(settings.ip, ip);
+        assert_eq!(settings.server_ip, Some(server));
+        assert_eq!(settings.lease_time_secs, Some(3600));
+        assert_eq!(settings.gateway, Some(gateways[0]));
+        assert_eq!(settings.subnet, Some(Ipv4Addr::new(255, 255, 255, 0)));
+        assert_eq!(settings.dns1, Some(dns[0]));
+        assert_eq!(settings.dns2, Some(dns[1]));
+        // The captive URL was not requested, so it is absent
+        assert_eq!(settings.captive_url, None);
+
+        // A NAK yields empty settings
+        let mut buf = Options::buf();
+        let nak = request.new_reply(
+            None,
+            request.options.reply(
+                MessageType::Nak,
+                server,
+                3600,
+                &gateways,
+                None,
+                &dns,
+                None,
+                &mut buf,
+            ),
+        );
+        let settings = Settings::new(&nak);
+        assert!(settings.ip.is_unspecified());
+        assert_eq!(settings.gateway, None);
+        assert_eq!(settings.dns1, None);
     }
 }

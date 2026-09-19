@@ -127,20 +127,23 @@ impl<'d> TcpSocket<'d> {
         stack: Stack<'d>,
         stack_buffers: &'d dyn DynPool<TcpSocketBuffers>,
     ) -> Result<Self, TcpError> {
-        let mut socket_buffers = stack_buffers.alloc().ok_or(TcpError::NoBuffers)?;
+        let socket_buffers = stack_buffers.alloc().ok_or(TcpError::NoBuffers)?;
 
+        // SAFETY: The buffers are exclusively owned by this socket until `free` is called from
+        // `Drop`, and the slices are built from the raw pointers (rather than from `&mut u8`
+        // references to their first byte) so that they cover the whole buffers.
         Ok(Self {
             socket: embassy_net::tcp::TcpSocket::new(
                 stack,
                 unsafe {
                     core::slice::from_raw_parts_mut(
-                        socket_buffers.rx_buf.as_mut(),
+                        socket_buffers.rx_buf.as_ptr(),
                         socket_buffers.rx_buf_len,
                     )
                 },
                 unsafe {
                     core::slice::from_raw_parts_mut(
-                        socket_buffers.tx_buf.as_mut(),
+                        socket_buffers.tx_buf.as_ptr(),
                         socket_buffers.tx_buf_len,
                     )
                 },
@@ -418,17 +421,28 @@ impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> SealedDynPool<TcpSo
     for TcpBuffers<N, TX_SZ, RX_SZ>
 {
     fn alloc(&self) -> Option<TcpSocketBuffers> {
-        let mut socket_buffers = Pool::alloc(self)?;
+        let socket_buffers = Pool::alloc(self)?;
 
-        let rx_buf = unsafe { &mut socket_buffers.as_mut().1 };
-        let tx_buf = unsafe { &mut socket_buffers.as_mut().0 };
+        // The buffers are addressed via raw pointers projected from the pool slot rather than via
+        // references to the slot as a whole: a reference to the whole slot would alias - and under
+        // the aliasing rules invalidate - the other buffer handed out from the same slot.
+        //
+        // SAFETY: `socket_buffers` points to a live slot of the pool.
+        let (tx_buf, rx_buf) = unsafe {
+            let slot = socket_buffers.as_ptr();
+
+            (
+                core::ptr::addr_of_mut!((*slot).0) as *mut u8,
+                core::ptr::addr_of_mut!((*slot).1) as *mut u8,
+            )
+        };
 
         Some(TcpSocketBuffers {
             token: socket_buffers.cast::<u8>(),
-            rx_buf: unwrap!(NonNull::new(rx_buf.as_mut_ptr())),
-            tx_buf: unwrap!(NonNull::new(tx_buf.as_mut_ptr())),
-            rx_buf_len: rx_buf.len(),
-            tx_buf_len: tx_buf.len(),
+            rx_buf: unwrap!(NonNull::new(rx_buf)),
+            tx_buf: unwrap!(NonNull::new(tx_buf)),
+            rx_buf_len: RX_SZ,
+            tx_buf_len: TX_SZ,
         })
     }
 
@@ -442,4 +456,77 @@ impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> SealedDynPool<TcpSo
 impl<const N: usize, const TX_SZ: usize, const RX_SZ: usize> DynPool<TcpSocketBuffers>
     for TcpBuffers<N, TX_SZ, RX_SZ>
 {
+}
+
+#[cfg(test)]
+mod test {
+    use embassy_net::StackResources;
+
+    use crate::sealed::SealedDynPool;
+
+    use super::{TcpBuffers, TcpSocket};
+
+    #[test]
+    fn buffers_alloc_free() {
+        let pool = TcpBuffers::<2, 8, 4>::new();
+
+        let a = SealedDynPool::alloc(&pool).unwrap();
+        let b = SealedDynPool::alloc(&pool).unwrap();
+        assert!(SealedDynPool::alloc(&pool).is_none());
+
+        assert_eq!(a.tx_buf_len, 8);
+        assert_eq!(a.rx_buf_len, 4);
+
+        // SAFETY: the pointers come from live allocations of the pool, with the given lengths
+        unsafe {
+            let a_tx = core::slice::from_raw_parts_mut(a.tx_buf.as_ptr(), a.tx_buf_len);
+            let a_rx = core::slice::from_raw_parts_mut(a.rx_buf.as_ptr(), a.rx_buf_len);
+            let b_tx = core::slice::from_raw_parts_mut(b.tx_buf.as_ptr(), b.tx_buf_len);
+            let b_rx = core::slice::from_raw_parts_mut(b.rx_buf.as_ptr(), b.rx_buf_len);
+
+            // All four buffers are live at the same time and must not overlap
+            a_tx.fill(1);
+            a_rx.fill(2);
+            b_tx.fill(3);
+            b_rx.fill(4);
+            assert!(a_tx.iter().all(|v| *v == 1));
+            assert!(a_rx.iter().all(|v| *v == 2));
+            assert!(b_tx.iter().all(|v| *v == 3));
+            assert!(b_rx.iter().all(|v| *v == 4));
+
+            SealedDynPool::free(&pool, a.token);
+        }
+
+        // A freed slot is handed out again
+        let c = SealedDynPool::alloc(&pool).unwrap();
+        assert_eq!(c.token, a.token);
+        assert!(SealedDynPool::alloc(&pool).is_none());
+
+        // SAFETY: `b` and `c` are live allocations of the pool
+        unsafe {
+            SealedDynPool::free(&pool, b.token);
+            SealedDynPool::free(&pool, c.token);
+        }
+
+        assert!(SealedDynPool::alloc(&pool).is_some());
+    }
+
+    #[test]
+    fn socket_new_and_drop() {
+        let mut resources = StackResources::<2>::new();
+        let (stack, _runner) = crate::test::stack(&mut resources);
+
+        let pool = TcpBuffers::<1, 16, 16>::new();
+
+        let Ok(socket) = TcpSocket::new(stack, &pool) else {
+            panic!("socket creation failed");
+        };
+
+        // The only slot of the pool is taken by the socket
+        assert!(TcpSocket::new(stack, &pool).is_err());
+
+        // Dropping the socket returns its buffers to the pool
+        drop(socket);
+        assert!(TcpSocket::new(stack, &pool).is_ok());
+    }
 }

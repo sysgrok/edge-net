@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+* Fix: `TcpBuffers` and `UdpBuffers` handed out the buffers of a pool slot via references to the whole slot, aliasing each other - undefined behavior flagged by Miri; the buffers are now addressed via raw pointers projected from the slot
+* Unit tests for the socket buffers pool, runnable under Miri (`cargo miri test -p edge-nal-embassy --all-features`); CI runs them under Miri
+
 ## [0.9.0] - 2026-06-25
 * Breaking: new trait: `UdpSplitMulticast` which is now required on the socket provided by `UdpBind` and `UdpConnect`
 * Update to `embassy-net` 0.9

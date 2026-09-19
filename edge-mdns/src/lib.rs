@@ -1083,6 +1083,15 @@ pub fn set_header<T: Composer>(answer: &mut MessageBuilder<T>, id: u16, response
 
 #[cfg(test)]
 mod test {
+    use core::net::{Ipv4Addr, Ipv6Addr};
+
+    use ::domain::base::iana::Rtype;
+    use ::domain::base::name::ParsedName;
+    use ::domain::base::{Message, MessageBuilder, Ttl};
+    use ::domain::rdata::{Srv, A};
+
+    use crate::host::{Host, Service, ServiceAnswers};
+
     use super::*;
 
     #[test]
@@ -1129,5 +1138,252 @@ mod test {
         assert_eq!(i.next(), Some(Label::from_slice("b".as_bytes()).unwrap()));
         assert_eq!(i.next_back(), None);
         assert_eq!(i.next(), None);
+    }
+
+    fn host() -> Host<'static> {
+        Host {
+            hostname: "myhost",
+            ipv4: Ipv4Addr::new(192, 168, 1, 2),
+            ipv6: Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1),
+            ttl: Ttl::from_secs(120),
+        }
+    }
+
+    fn service() -> Service<'static> {
+        Service {
+            name: "My Service",
+            priority: 0,
+            weight: 0,
+            service: "_http",
+            protocol: "_tcp",
+            port: 8080,
+            service_subtypes: &["_printer"],
+            txt_kvs: &[("path", "/index.html")],
+        }
+    }
+
+    fn query(name: NameSlice<'_>, rtype: Rtype, id: u16, qr: bool, buf: &mut [u8]) -> usize {
+        let mut mb = MessageBuilder::from_target(Buf::new(buf)).unwrap();
+        mb.header_mut().set_id(id);
+        mb.header_mut().set_qr(qr);
+
+        let mut qb = mb.question();
+        qb.push((name, rtype)).unwrap();
+
+        qb.finish().1
+    }
+
+    fn handle<'a>(
+        handler: &mut impl MdnsHandler,
+        legacy: bool,
+        data: &[u8],
+        buf: &'a mut [u8],
+    ) -> MdnsResponse<'a> {
+        handler
+            .handle(
+                MdnsRequest::Request {
+                    legacy,
+                    multicast: true,
+                    data,
+                },
+                buf,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn host_answers_queries_for_its_name() {
+        let host = host();
+        let mut handler = HostAnswersMdnsHandler::new(&host);
+
+        let mut qbuf = [0; 256];
+        let qlen = query(
+            NameSlice::new(&["myhost", "local"]),
+            Rtype::A,
+            0,
+            false,
+            &mut qbuf,
+        );
+
+        let mut rbuf = [0; 512];
+        let MdnsResponse::Reply { data, delay } =
+            handle(&mut handler, false, &qbuf[..qlen], &mut rbuf)
+        else {
+            panic!("no reply");
+        };
+        assert!(!delay);
+
+        let msg = Message::from_octets(data).unwrap();
+        assert!(msg.header().qr());
+        assert!(msg.header().aa());
+        assert_eq!(msg.header().id(), 0);
+        assert_eq!(msg.header_counts().qdcount(), 0);
+        // All records owned by the name are sent, regardless of the question type
+        assert_eq!(msg.header_counts().ancount(), 2);
+
+        let record = msg
+            .answer()
+            .unwrap()
+            .limit_to::<A>()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.data().addr().octets(), [192, 168, 1, 2]);
+        assert_eq!(record.ttl(), Ttl::from_secs(120));
+        assert!(record
+            .owner()
+            .name_eq(&NameSlice::new(&["myhost", "local"])));
+    }
+
+    #[test]
+    fn unknown_names_and_responses_are_not_answered() {
+        let host = host();
+        let mut handler = HostAnswersMdnsHandler::new(&host);
+
+        let mut qbuf = [0; 256];
+        let qlen = query(
+            NameSlice::new(&["other", "local"]),
+            Rtype::A,
+            0,
+            false,
+            &mut qbuf,
+        );
+        let mut rbuf = [0; 512];
+        assert_eq!(
+            handle(&mut handler, false, &qbuf[..qlen], &mut rbuf),
+            MdnsResponse::None
+        );
+
+        // A response (rather than a query) for our own name is ignored too
+        let qlen = query(
+            NameSlice::new(&["myhost", "local"]),
+            Rtype::A,
+            0,
+            true,
+            &mut qbuf,
+        );
+        assert_eq!(
+            handle(&mut handler, false, &qbuf[..qlen], &mut rbuf),
+            MdnsResponse::None
+        );
+    }
+
+    #[test]
+    fn legacy_queries_echo_the_id_and_the_question() {
+        let host = host();
+        let mut handler = HostAnswersMdnsHandler::new(&host);
+
+        let mut qbuf = [0; 256];
+        let qlen = query(
+            NameSlice::new(&["myhost", "local"]),
+            Rtype::A,
+            0x4242,
+            false,
+            &mut qbuf,
+        );
+
+        let mut rbuf = [0; 512];
+        let MdnsResponse::Reply { data, .. } = handle(&mut handler, true, &qbuf[..qlen], &mut rbuf)
+        else {
+            panic!("no reply");
+        };
+
+        let msg = Message::from_octets(data).unwrap();
+        assert_eq!(msg.header().id(), 0x4242);
+        assert_eq!(msg.header_counts().qdcount(), 1);
+        assert_eq!(msg.header_counts().ancount(), 2);
+    }
+
+    #[test]
+    fn no_request_announces_everything() {
+        let host = host();
+        let mut handler = HostAnswersMdnsHandler::new(&host);
+
+        let mut rbuf = [0; 512];
+        let MdnsResponse::Reply { data, .. } =
+            handler.handle(MdnsRequest::None, &mut rbuf).unwrap()
+        else {
+            panic!("no reply");
+        };
+
+        let msg = Message::from_octets(data).unwrap();
+        assert!(msg.header().qr());
+        assert_eq!(msg.header_counts().qdcount(), 0);
+        assert_eq!(msg.header_counts().ancount(), 2);
+    }
+
+    #[test]
+    fn service_answers() {
+        let host = host();
+        let service = service();
+        let answers = ServiceAnswers::new(&host, &service);
+
+        // Host A + AAAA, SRV, TXT, two PTRs and three records per subtype
+        let mut count = 0;
+        answers
+            .visit(|_| {
+                count += 1;
+                Ok::<_, MdnsError>(())
+            })
+            .unwrap();
+        assert_eq!(count, 2 + 4 + 3);
+
+        // A service type query gets the PTR record, with SRV, TXT and address records as additional data
+        let mut handler = HostAnswersMdnsHandler::new(&answers);
+        let mut qbuf = [0; 256];
+        let qlen = query(
+            NameSlice::new(&["_http", "_tcp", "local"]),
+            Rtype::PTR,
+            0,
+            false,
+            &mut qbuf,
+        );
+        let mut rbuf = [0; 1024];
+        let MdnsResponse::Reply { data, .. } =
+            handle(&mut handler, false, &qbuf[..qlen], &mut rbuf)
+        else {
+            panic!("no reply");
+        };
+
+        let msg = Message::from_octets(data).unwrap();
+        assert_eq!(msg.header_counts().ancount(), 1);
+        assert_eq!(msg.header_counts().arcount(), 4);
+
+        let srv = msg
+            .additional()
+            .unwrap()
+            .limit_to::<Srv<ParsedName<&[u8]>>>()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(srv.data().port(), 8080);
+        assert!(srv
+            .data()
+            .target()
+            .name_eq(&NameSlice::new(&["myhost", "local"])));
+        assert!(msg.additional().unwrap().limit_to::<A>().next().is_some());
+
+        // The DNS-SD enumeration query lists the service type and its subtype
+        let qlen = query(DNS_SD_OWNER, Rtype::PTR, 0, false, &mut qbuf);
+        let MdnsResponse::Reply { data, .. } =
+            handle(&mut handler, false, &qbuf[..qlen], &mut rbuf)
+        else {
+            panic!("no reply");
+        };
+        let msg = Message::from_octets(data).unwrap();
+        assert_eq!(msg.header_counts().ancount(), 2);
+    }
+
+    #[test]
+    fn display() {
+        use core::fmt::Write;
+
+        let mut s = heapless::String::<64>::new();
+        write!(s, "{}", NameSlice::new(&["a", "b", "local"])).unwrap();
+        assert_eq!(s, "a.b.local.");
+
+        s.clear();
+        write!(s, "{}", Txt::new(&[("k1", "v1"), ("k2", "v2")])).unwrap();
+        assert_eq!(s, "Txt [k1=v1, k2=v2]");
     }
 }

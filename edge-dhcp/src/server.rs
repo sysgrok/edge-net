@@ -311,3 +311,261 @@ impl<const N: usize> Server<fn() -> u64, N> {
         Self::new(|| embassy_time::Instant::now().as_secs(), ip)
     }
 }
+
+#[cfg(test)]
+mod test {
+    use core::cell::Cell;
+    use core::net::Ipv4Addr;
+
+    use crate::{DhcpOption, MessageType, Options, Packet, Settings};
+
+    use super::{Server, ServerOptions};
+
+    const SERVER_IP: Ipv4Addr = Ipv4Addr::new(192, 168, 0, 1);
+
+    fn mac(n: u8) -> [u8; 6] {
+        [0x02, 0, 0, 0, 0, n]
+    }
+
+    fn message_type(packet: &Packet) -> Option<MessageType> {
+        packet.options.iter().find_map(|option| match option {
+            DhcpOption::MessageType(mt) => Some(mt),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn dora_and_leases() {
+        let clock = Cell::new(1000_u64);
+        let mut server = Server::<_, 4>::new(|| clock.get(), SERVER_IP);
+        let mut gw_buf = [Ipv4Addr::UNSPECIFIED];
+        let server_options = ServerOptions::new(SERVER_IP, Some(&mut gw_buf));
+
+        // Discover: the first address of the range is offered
+        let mut opt_buf = Options::buf();
+        let discover = Packet::new_request(
+            mac(1),
+            11,
+            0,
+            None,
+            true,
+            Options::discover(None, &mut opt_buf),
+        );
+        let mut reply_buf = Options::buf();
+        let offer = server
+            .handle_request(&mut reply_buf, &server_options, &discover)
+            .unwrap();
+        assert_eq!(message_type(&offer), Some(MessageType::Offer));
+        assert!(offer.reply);
+        assert_eq!(offer.xid, 11);
+        assert_eq!(offer.chaddr, discover.chaddr);
+        assert_eq!(offer.yiaddr, Ipv4Addr::new(192, 168, 0, 50));
+        assert!(server.leases.is_empty());
+
+        // Request: the address is acknowledged and leased, with the requested parameters filled in
+        let mut opt_buf = Options::buf();
+        let request = Packet::new_request(
+            mac(1),
+            12,
+            0,
+            None,
+            true,
+            Options::request(offer.yiaddr, &mut opt_buf),
+        );
+        let mut reply_buf = Options::buf();
+        let ack = server
+            .handle_request(&mut reply_buf, &server_options, &request)
+            .unwrap();
+        assert_eq!(message_type(&ack), Some(MessageType::Ack));
+        assert_eq!(ack.yiaddr, Ipv4Addr::new(192, 168, 0, 50));
+        let settings = Settings::new(&ack);
+        assert_eq!(settings.server_ip, Some(SERVER_IP));
+        assert_eq!(settings.lease_time_secs, Some(7200));
+        assert_eq!(settings.gateway, Some(SERVER_IP));
+        assert_eq!(settings.subnet, Some(Ipv4Addr::new(255, 255, 255, 0)));
+        assert_eq!(settings.dns1, None);
+        assert_eq!(server.leases.len(), 1);
+
+        // A second client is offered the next free address
+        let mut opt_buf = Options::buf();
+        let discover2 = Packet::new_request(
+            mac(2),
+            21,
+            0,
+            None,
+            true,
+            Options::discover(None, &mut opt_buf),
+        );
+        let mut reply_buf = Options::buf();
+        let offer2 = server
+            .handle_request(&mut reply_buf, &server_options, &discover2)
+            .unwrap();
+        assert_eq!(offer2.yiaddr, Ipv4Addr::new(192, 168, 0, 51));
+
+        // The first client re-discovering gets its own lease back
+        let mut reply_buf = Options::buf();
+        let offer = server
+            .handle_request(&mut reply_buf, &server_options, &discover)
+            .unwrap();
+        assert_eq!(offer.yiaddr, Ipv4Addr::new(192, 168, 0, 50));
+
+        // Requesting an address leased to somebody else is refused
+        let mut opt_buf = Options::buf();
+        let request2 = Packet::new_request(
+            mac(2),
+            22,
+            0,
+            None,
+            true,
+            Options::request(Ipv4Addr::new(192, 168, 0, 50), &mut opt_buf),
+        );
+        let mut reply_buf = Options::buf();
+        let nak = server
+            .handle_request(&mut reply_buf, &server_options, &request2)
+            .unwrap();
+        assert_eq!(message_type(&nak), Some(MessageType::Nak));
+        assert!(nak.yiaddr.is_unspecified());
+        assert_eq!(server.leases.len(), 1);
+
+        // Release frees the lease
+        let release_opts = [
+            DhcpOption::MessageType(MessageType::Release),
+            DhcpOption::ServerIdentifier(SERVER_IP),
+        ];
+        let release = Packet::new_request(
+            mac(1),
+            13,
+            0,
+            Some(Ipv4Addr::new(192, 168, 0, 50)),
+            false,
+            Options::new(&release_opts),
+        );
+        let mut reply_buf = Options::buf();
+        assert!(server
+            .handle_request(&mut reply_buf, &server_options, &release)
+            .is_none());
+        assert!(server.leases.is_empty());
+
+        // A leased address is refused to others until the lease expires
+        let mut opt_buf = Options::buf();
+        let request3 = Packet::new_request(
+            mac(3),
+            31,
+            0,
+            None,
+            true,
+            Options::request(Ipv4Addr::new(192, 168, 0, 60), &mut opt_buf),
+        );
+        let mut reply_buf = Options::buf();
+        let ack3 = server
+            .handle_request(&mut reply_buf, &server_options, &request3)
+            .unwrap();
+        assert_eq!(message_type(&ack3), Some(MessageType::Ack));
+
+        let mut opt_buf = Options::buf();
+        let request4 = Packet::new_request(
+            mac(4),
+            41,
+            0,
+            None,
+            true,
+            Options::request(Ipv4Addr::new(192, 168, 0, 60), &mut opt_buf),
+        );
+        let mut reply_buf = Options::buf();
+        let nak4 = server
+            .handle_request(&mut reply_buf, &server_options, &request4)
+            .unwrap();
+        assert_eq!(message_type(&nak4), Some(MessageType::Nak));
+
+        clock.set(1000 + 7201);
+        let mut reply_buf = Options::buf();
+        let ack4 = server
+            .handle_request(&mut reply_buf, &server_options, &request4)
+            .unwrap();
+        assert_eq!(message_type(&ack4), Some(MessageType::Ack));
+        assert_eq!(ack4.yiaddr, Ipv4Addr::new(192, 168, 0, 60));
+    }
+
+    #[test]
+    fn ignored_requests() {
+        let mut server = Server::<_, 4>::new(|| 0_u64, SERVER_IP);
+        let server_options = ServerOptions::new(SERVER_IP, None);
+        let ip = Ipv4Addr::new(192, 168, 0, 50);
+
+        // Addressed to another server
+        let opts = [
+            DhcpOption::MessageType(MessageType::Request),
+            DhcpOption::ServerIdentifier(Ipv4Addr::new(192, 168, 0, 2)),
+            DhcpOption::RequestedIpAddress(ip),
+        ];
+        let request = Packet::new_request(mac(1), 1, 0, None, true, Options::new(&opts));
+        let mut reply_buf = Options::buf();
+        assert!(server
+            .handle_request(&mut reply_buf, &server_options, &request)
+            .is_none());
+
+        // Without a message type
+        let request = Packet::new_request(mac(1), 2, 0, None, true, Options::new(&[]));
+        let mut reply_buf = Options::buf();
+        assert!(server
+            .handle_request(&mut reply_buf, &server_options, &request)
+            .is_none());
+
+        // A `Request` without a requested address
+        let opts = [DhcpOption::MessageType(MessageType::Request)];
+        let request = Packet::new_request(mac(1), 3, 0, None, true, Options::new(&opts));
+        let mut reply_buf = Options::buf();
+        assert!(server
+            .handle_request(&mut reply_buf, &server_options, &request)
+            .is_none());
+
+        // Replies are never processed
+        let opts = [DhcpOption::MessageType(MessageType::Discover)];
+        let reply = Packet::new_request(mac(1), 4, 0, None, true, Options::new(&opts))
+            .new_reply(None, Options::new(&opts));
+        let mut reply_buf = Options::buf();
+        assert!(server
+            .handle_request(&mut reply_buf, &server_options, &reply)
+            .is_none());
+
+        assert!(server.leases.is_empty());
+    }
+
+    #[test]
+    fn lease_table_capacity() {
+        let mut server = Server::<_, 1>::new(|| 0_u64, SERVER_IP);
+        let server_options = ServerOptions::new(SERVER_IP, None);
+
+        let mut opt_buf = Options::buf();
+        let request = Packet::new_request(
+            mac(1),
+            1,
+            0,
+            None,
+            true,
+            Options::request(Ipv4Addr::new(192, 168, 0, 50), &mut opt_buf),
+        );
+        let mut reply_buf = Options::buf();
+        let ack = server
+            .handle_request(&mut reply_buf, &server_options, &request)
+            .unwrap();
+        assert_eq!(message_type(&ack), Some(MessageType::Ack));
+
+        // The lease table is full: a second client gets a NAK
+        let mut opt_buf = Options::buf();
+        let request = Packet::new_request(
+            mac(2),
+            2,
+            0,
+            None,
+            true,
+            Options::request(Ipv4Addr::new(192, 168, 0, 51), &mut opt_buf),
+        );
+        let mut reply_buf = Options::buf();
+        let nak = server
+            .handle_request(&mut reply_buf, &server_options, &request)
+            .unwrap();
+        assert_eq!(message_type(&nak), Some(MessageType::Nak));
+        assert_eq!(server.leases.len(), 1);
+    }
+}

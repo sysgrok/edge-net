@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+* Unit tests for the packet codec, the options builders, `Settings`, and the client and server state machines
 * Fix a wrong encoding of a sequence of more than one IP address (#102)
 
 ## [0.8.0] - 2026-06-25

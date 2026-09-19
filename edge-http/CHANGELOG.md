@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+* Unit tests for `Method`, `Headers`, the connection and body type resolution, the WebSocket upgrade helpers, and the request/response header and body I/O
 * Fix: reduce the memory taken by the HTTP server by 2x (#105)
 
 ## [0.8.0] - 2026-06-25

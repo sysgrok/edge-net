@@ -101,3 +101,55 @@ impl<'a> BytesOut<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::{BytesIn, BytesOut, Error};
+
+    #[test]
+    fn bytes_in() {
+        let data = [1u8, 2, 3, 4, 5];
+
+        let mut bytes = BytesIn::new(&data);
+        assert!(!bytes.is_empty());
+        assert_eq!(bytes.offset(), 0);
+        assert_eq!(bytes.byte(), Ok(1));
+        assert_eq!(bytes.arr::<2>(), Ok([2, 3]));
+        assert_eq!(bytes.offset(), 3);
+        assert_eq!(bytes.slice(1), Ok(&[4][..]));
+        assert_eq!(bytes.arr::<5>(), Err(Error::DataUnderflow));
+        assert_eq!(bytes.remaining(), &[5]);
+        assert!(bytes.is_empty());
+        assert_eq!(bytes.byte(), Err(Error::DataUnderflow));
+
+        // `remaining_*` consume everything and insist on an exact fit
+        let mut bytes = BytesIn::new(&data[..1]);
+        assert_eq!(bytes.remaining_byte(), Ok(1));
+        let mut bytes = BytesIn::new(&data[..2]);
+        assert_eq!(bytes.remaining_byte(), Err(Error::InvalidFormat));
+        let mut bytes = BytesIn::new(&data[..2]);
+        assert_eq!(bytes.remaining_arr::<2>(), Ok([1, 2]));
+        let mut bytes = BytesIn::new(&data[..1]);
+        assert_eq!(bytes.remaining_arr::<2>(), Err(Error::DataUnderflow));
+    }
+
+    #[test]
+    fn bytes_out() {
+        let mut buf = [0u8; 4];
+
+        let mut bytes = BytesOut::new(&mut buf);
+        assert!(bytes.is_empty());
+        bytes.byte(1).unwrap().push(&[2, 3]).unwrap();
+        assert_eq!(bytes.len(), 3);
+
+        // An overflowing push writes nothing
+        assert_eq!(bytes.push(&[4, 5]).err(), Some(Error::BufferOverflow));
+        assert_eq!(bytes.len(), 3);
+
+        bytes.byte(4).unwrap();
+        assert_eq!(bytes.len(), 4);
+        assert_eq!(bytes.byte(5).err(), Some(Error::BufferOverflow));
+
+        assert_eq!(buf, [1, 2, 3, 4]);
+    }
+}

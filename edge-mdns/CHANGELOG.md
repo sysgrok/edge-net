@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 * Unit tests for the host and service responders
 * A fix for `DoubleEndedIterator` (#104)
+* `Host` and `Service` records carry the cache-flush bit (RFC 6762 §10.2); other `HostAnswers` mark their unique records with the new `CLASS_IN_UNIQUE`
 
 ## [0.8.0] - 2026-06-25
 * Breaking: update the `edge-nal` dependency

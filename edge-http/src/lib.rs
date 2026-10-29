@@ -62,6 +62,48 @@ impl defmt::Format for HeadersMismatchError {
 
 impl core::error::Error for HeadersMismatchError {}
 
+/// Errors related to invalid body type headers (Content-Length, Transfer-Encoding)
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[non_exhaustive]
+pub enum BodyHeadersError {
+    /// The value of a `Content-Length` header is not a valid non-negative decimal integer
+    /// fitting in a `u64`
+    InvalidContentLength,
+}
+
+impl Display for BodyHeadersError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InvalidContentLength => write!(f, "Invalid Content-Length header"),
+        }
+    }
+}
+
+#[cfg(feature = "defmt")]
+impl defmt::Format for BodyHeadersError {
+    fn format(&self, f: defmt::Formatter<'_>) {
+        match self {
+            Self::InvalidContentLength => defmt::write!(f, "Invalid Content-Length header"),
+        }
+    }
+}
+
+impl core::error::Error for BodyHeadersError {}
+
+/// Parse the value of a `Content-Length` header
+///
+/// Only accepts `1*DIGIT` as per RFC 9110, section 8.6
+fn parse_content_len(value: &str) -> Result<u64, BodyHeadersError> {
+    // `u64::from_str` accepts only digits, apart from a single leading `+`
+    if value.starts_with('+') {
+        return Err(BodyHeadersError::InvalidContentLength);
+    }
+
+    value
+        .parse()
+        .map_err(|_| BodyHeadersError::InvalidContentLength)
+}
+
 /// Http methods
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "std", derive(Hash))]
@@ -238,13 +280,12 @@ impl<'b, const N: usize> Headers<'b, N> {
     }
 
     /// Utility method to return the value of the `Content-Length` header, if present
-    pub fn content_len(&self) -> Option<u64> {
-        self.get("Content-Length").map(|content_len_str| {
-            unwrap!(
-                content_len_str.parse::<u64>(),
-                "Invalid Content-Length header"
-            )
-        })
+    ///
+    /// Returns an error if the header value is not a valid content length.
+    pub fn content_len(&self) -> Result<Option<u64>, BodyHeadersError> {
+        self.get("Content-Length")
+            .map(parse_content_len)
+            .transpose()
     }
 
     /// Utility method to return the value of the `Content-Type` header, if present
@@ -690,34 +731,33 @@ impl BodyType {
 
     /// Create a body type from a header
     ///
-    /// If the header is not a `Content-Length` or `Transfer-Encoding` header, this method returns `None`
-    pub fn from_header(name: &str, value: &str) -> Option<Self> {
+    /// If the header is not a `Content-Length` or `Transfer-Encoding` header, this method returns `Ok(None)`
+    /// If the header is a `Content-Length` header with an invalid value, this method returns an error
+    pub fn from_header(name: &str, value: &str) -> Result<Option<Self>, BodyHeadersError> {
         if "Transfer-Encoding".eq_ignore_ascii_case(name) {
             if value.eq_ignore_ascii_case("Chunked") {
-                return Some(Self::Chunked);
+                return Ok(Some(Self::Chunked));
             }
         } else if "Content-Length".eq_ignore_ascii_case(name) {
-            return Some(Self::ContentLen(unwrap!(
-                value.parse::<u64>(),
-                "Invalid Content-Length header"
-            ))); // TODO
+            return Ok(Some(Self::ContentLen(parse_content_len(value)?)));
         }
 
-        None
+        Ok(None)
     }
 
     /// Create a body type from headers
     ///
     /// If multiple body type headers are found, this method logs a warning and returns the last one
-    /// If no body type headers are found, this method returns `None`
-    pub fn from_headers<'a, H>(headers: H) -> Option<Self>
+    /// If no body type headers are found, this method returns `Ok(None)`
+    /// If a `Content-Length` header with an invalid value is found, this method returns an error
+    pub fn from_headers<'a, H>(headers: H) -> Result<Option<Self>, BodyHeadersError>
     where
         H: IntoIterator<Item = (&'a str, &'a str)>,
     {
         let mut body = None;
 
         for (name, value) in headers {
-            let header_body = Self::from_header(name, value);
+            let header_body = Self::from_header(name, value)?;
 
             if let Some(header_body) = header_body {
                 if let Some(body) = body {
@@ -732,7 +772,7 @@ impl BodyType {
             }
         }
 
-        body
+        Ok(body)
     }
 
     /// Create a raw header from the body type
@@ -1170,7 +1210,8 @@ mod test {
             upgrade_response_headers, UpgradeError, MAX_BASE64_KEY_LEN,
             MAX_BASE64_KEY_RESPONSE_LEN,
         },
-        BodyType, ConnectionType, Headers, Method, RequestHeaders, ResponseHeaders,
+        BodyHeadersError, BodyType, ConnectionType, Headers, Method, RequestHeaders,
+        ResponseHeaders,
     };
 
     #[test]
@@ -1585,7 +1626,7 @@ mod test {
         // Typed setters
         let mut buf = heapless::String::new();
         headers.set_content_len(42, &mut buf);
-        assert_eq!(headers.content_len(), Some(42));
+        assert_eq!(headers.content_len(), Ok(Some(42)));
         headers.set_connection_close();
         assert_eq!(headers.connection(), Some("Close"));
         headers.set_transfer_encoding_chunked();
@@ -1646,17 +1687,17 @@ mod test {
 
         assert_eq!(
             BodyType::from_header("transfer-encoding", "chunked"),
-            Some(BodyType::Chunked)
+            Ok(Some(BodyType::Chunked))
         );
         assert_eq!(
             BodyType::from_header("Content-Length", "12"),
-            Some(BodyType::ContentLen(12))
+            Ok(Some(BodyType::ContentLen(12)))
         );
-        assert_eq!(BodyType::from_header("Transfer-Encoding", "gzip"), None);
-        assert_eq!(BodyType::from_header("Content-Type", "12"), None);
+        assert_eq!(BodyType::from_header("Transfer-Encoding", "gzip"), Ok(None));
+        assert_eq!(BodyType::from_header("Content-Type", "12"), Ok(None));
         assert_eq!(
             BodyType::from_headers([("Content-Length", "1"), ("Transfer-Encoding", "Chunked")]),
-            Some(BodyType::Chunked)
+            Ok(Some(BodyType::Chunked))
         );
 
         let mut buf = heapless::String::new();
@@ -1669,6 +1710,42 @@ mod test {
             Some(("Content-Length", &b"7"[..]))
         );
         assert_eq!(BodyType::Raw.raw_header(&mut buf), None);
+    }
+
+    #[test]
+    fn test_invalid_content_len() {
+        assert_eq!(
+            BodyType::from_header("content-length", "0"),
+            Ok(Some(BodyType::ContentLen(0)))
+        );
+        assert_eq!(
+            BodyType::from_header("Content-Length", "007"),
+            Ok(Some(BodyType::ContentLen(7)))
+        );
+        assert_eq!(
+            BodyType::from_header("Content-Length", "18446744073709551615"),
+            Ok(Some(BodyType::ContentLen(u64::MAX)))
+        );
+
+        for value in ["abc", "", "-1", "+5", "5 5", "0x10", "18446744073709551616"] {
+            assert_eq!(
+                BodyType::from_header("Content-Length", value),
+                Err(BodyHeadersError::InvalidContentLength)
+            );
+            assert_eq!(
+                BodyType::from_headers([("Host", "x"), ("Content-Length", value)]),
+                Err(BodyHeadersError::InvalidContentLength)
+            );
+
+            let mut headers = Headers::<1>::new();
+            headers.set("Content-Length", value);
+            assert_eq!(
+                headers.content_len(),
+                Err(BodyHeadersError::InvalidContentLength)
+            );
+        }
+
+        assert_eq!(Headers::<1>::new().content_len(), Ok(None));
     }
 
     #[test]

@@ -8,8 +8,8 @@ use httparse::Status;
 
 use crate::ws::UpgradeError;
 use crate::{
-    BodyType, ConnectionType, Headers, HeadersMismatchError, Method, RequestHeaders,
-    ResponseHeaders,
+    BodyHeadersError, BodyType, ConnectionType, Headers, HeadersMismatchError, Method,
+    RequestHeaders, ResponseHeaders,
 };
 
 pub mod client;
@@ -67,6 +67,12 @@ impl<E> From<httparse::Error> for Error<E> {
             httparse::Error::TooManyHeaders => Self::TooManyHeaders,
             httparse::Error::Version => Self::InvalidHeaders,
         }
+    }
+}
+
+impl<E> From<BodyHeadersError> for Error<E> {
+    fn from(_: BodyHeadersError) -> Self {
+        Self::InvalidHeaders
     }
 }
 
@@ -425,7 +431,7 @@ impl<const N: usize> Headers<'_, N> {
         http11: bool,
     ) -> Result<(ConnectionType, BodyType), Error<E>> {
         let headers_connection_type = ConnectionType::from_headers(self.iter());
-        let headers_body_type = BodyType::from_headers(self.iter());
+        let headers_body_type = BodyType::from_headers(self.iter())?;
 
         let connection_type =
             ConnectionType::resolve(headers_connection_type, carry_over_connection_type, http11)?;
@@ -1257,7 +1263,7 @@ mod raw {
                 connection = Some(header_connection);
             }
 
-            let header_body = BodyType::from_header(name, str::from_utf8(value).unwrap_or(""));
+            let header_body = BodyType::from_header(name, str::from_utf8(value).unwrap_or(""))?;
 
             if let Some(header_body) = header_body {
                 if let Some(body) = body {
@@ -1405,7 +1411,7 @@ mod test {
             assert_eq!(parsed.path, "/api?x=1");
             assert!(parsed.http11);
             assert_eq!(parsed.headers.host(), Some("example.com"));
-            assert_eq!(parsed.headers.content_len(), Some(5));
+            assert_eq!(parsed.headers.content_len(), Ok(Some(5)));
             assert_eq!(&body_buf[..read_len], b"hello");
 
             let (connection_type, body_type) = parsed.resolve::<Infallible>().unwrap();
@@ -1476,7 +1482,7 @@ mod test {
             assert!(response.http11);
             assert_eq!(response.code, 404);
             assert_eq!(response.reason, Some("Not Found"));
-            assert_eq!(response.headers.content_len(), Some(3));
+            assert_eq!(response.headers.content_len(), Ok(Some(3)));
             assert_eq!(&body_buf[..read_len], b"abc");
             assert_eq!(
                 response
@@ -1526,6 +1532,54 @@ mod test {
                 .receive(&mut buf, SliceRead(b"garbage\r\n\r\n"), false)
                 .await
                 .is_err());
+        })
+    }
+
+    #[test]
+    fn test_invalid_content_len() {
+        block_on(async {
+            // A request with an invalid `Content-Length` is rejected when resolving
+            // the body type (as `Connection::new` does), rather than panicking
+            for value in ["abc", "", "-1", "18446744073709551616"] {
+                let mut input = [0u8; 128];
+                let mut w = SliceWrite(&mut input, 0);
+                w.write_all(b"POST / HTTP/1.1\r\nContent-Length: ")
+                    .await
+                    .unwrap();
+                w.write_all(value.as_bytes()).await.unwrap();
+                w.write_all(b"\r\n\r\nhello").await.unwrap();
+                let len = w.1;
+
+                let mut buf = [0u8; 128];
+                let mut request = RequestHeaders::<8>::new();
+                request
+                    .receive(&mut buf, SliceRead(&input[..len]), false)
+                    .await
+                    .unwrap();
+                assert_eq!(request.resolve::<Infallible>(), Err(Error::InvalidHeaders));
+            }
+
+            // Same for a response
+            let input = b"HTTP/1.1 200 OK\r\nContent-Length: abc\r\n\r\n";
+            let mut buf = [0u8; 128];
+            let mut response = ResponseHeaders::<8>::new();
+            response
+                .receive(&mut buf, SliceRead(input), false)
+                .await
+                .unwrap();
+            assert_eq!(
+                response.resolve::<Infallible>(ConnectionType::KeepAlive),
+                Err(Error::InvalidHeaders)
+            );
+
+            // Sending headers with an invalid `Content-Length` is an error too
+            let mut out = [0u8; 128];
+            let mut request = RequestHeaders::<8>::new();
+            request.headers.set("Content-Length", "abc");
+            assert_eq!(
+                request.send(false, SliceWrite(&mut out, 0)).await,
+                Err(Error::InvalidHeaders)
+            );
         })
     }
 

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 * Unit tests for `Method`, `Headers`, the connection and body type resolution, the WebSocket upgrade helpers, and the request/response header and body I/O
 * Fix: reduce the memory taken by the HTTP server by 2x (#105)
+* Breaking: fix a panic on an invalid `Content-Length` header; `BodyType::from_header(s)` and `Headers::content_len` now return a `Result` (#109)
 
 ## [0.8.0] - 2026-06-25
 * Breaking: update the `edge-nal` dependency

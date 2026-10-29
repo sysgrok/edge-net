@@ -431,7 +431,7 @@ impl<const N: usize> Headers<'_, N> {
         http11: bool,
     ) -> Result<(ConnectionType, BodyType), Error<E>> {
         let headers_connection_type = ConnectionType::from_headers(self.iter());
-        let headers_body_type = BodyType::try_from_headers(self.iter())?;
+        let headers_body_type = BodyType::from_headers(self.iter())?;
 
         let connection_type =
             ConnectionType::resolve(headers_connection_type, carry_over_connection_type, http11)?;
@@ -1263,7 +1263,7 @@ mod raw {
                 connection = Some(header_connection);
             }
 
-            let header_body = BodyType::try_from_header(name, str::from_utf8(value).unwrap_or(""))?;
+            let header_body = BodyType::from_header(name, str::from_utf8(value).unwrap_or(""))?;
 
             if let Some(header_body) = header_body {
                 if let Some(body) = body {
@@ -1411,7 +1411,7 @@ mod test {
             assert_eq!(parsed.path, "/api?x=1");
             assert!(parsed.http11);
             assert_eq!(parsed.headers.host(), Some("example.com"));
-            assert_eq!(parsed.headers.try_content_len(), Ok(Some(5)));
+            assert_eq!(parsed.headers.content_len(), Ok(Some(5)));
             assert_eq!(&body_buf[..read_len], b"hello");
 
             let (connection_type, body_type) = parsed.resolve::<Infallible>().unwrap();
@@ -1482,7 +1482,7 @@ mod test {
             assert!(response.http11);
             assert_eq!(response.code, 404);
             assert_eq!(response.reason, Some("Not Found"));
-            assert_eq!(response.headers.try_content_len(), Ok(Some(3)));
+            assert_eq!(response.headers.content_len(), Ok(Some(3)));
             assert_eq!(&body_buf[..read_len], b"abc");
             assert_eq!(
                 response

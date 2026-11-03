@@ -8,7 +8,10 @@ use edge_nal::{
 
 use embedded_io_async::{ErrorType, Read, Write};
 
-use super::{send_headers, send_status, Body, Error, RequestHeaders, SendBody};
+use super::{
+    check_no_framing_headers, response_has_no_body, send_headers, send_status, Body, Error,
+    Framing, RequestHeaders, SendBody,
+};
 
 use crate::ws::{upgrade_response_headers, MAX_BASE64_KEY_RESPONSE_LEN};
 use crate::{ConnectionType, DEFAULT_MAX_HEADERS_COUNT};
@@ -135,15 +138,19 @@ where
         let result = self.request_mut();
 
         match result {
-            Ok(_) => {
+            Ok(request) => {
                 let headers = [("Connection", "Close"), ("Content-Type", "text/plain")];
+
+                let no_body = response_has_no_body(request.request.method, 500);
 
                 self.complete_request(500, Some("Internal Error"), &headers)
                     .await?;
 
                 let response = self.response_mut()?;
 
-                response.io.write_all(err.as_bytes()).await?;
+                if !no_body {
+                    response.io.write_all(err.as_bytes()).await?;
+                }
                 response.io.finish().await?;
 
                 Ok(())
@@ -180,6 +187,18 @@ where
     ) -> Result<(), Error<T::Error>> {
         let request = self.request_mut()?;
 
+        let forbids_framing_headers = matches!(status, 100..=199 | 204);
+
+        let framing = if response_has_no_body(request.request.method, status) {
+            if forbids_framing_headers {
+                check_no_framing_headers(headers)?;
+            }
+
+            Framing::NoBody
+        } else {
+            Framing::ChunkedIfUnspecified
+        };
+
         let mut buf = [0; COMPLETION_BUF_SIZE];
         while request.io.read(&mut buf).await? > 0 {}
 
@@ -192,11 +211,13 @@ where
             send_status(http11, status, reason, &mut io).await?;
 
             let (connection_type, body_type) = send_headers(
-                headers.iter(),
+                headers.iter().filter(|(name, _)| {
+                    !(forbids_framing_headers && "Content-Length".eq_ignore_ascii_case(name))
+                }),
                 Some(request_connection_type),
                 false,
                 http11,
-                true,
+                framing,
                 &mut io,
             )
             .await?;
@@ -1008,5 +1029,306 @@ impl<const P: usize, const B: usize, const N: usize> Server<P, B, N> {
 impl<const P: usize, const B: usize, const N: usize> Default for Server<P, B, N> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::large_futures)]
+mod test {
+    use core::convert::Infallible;
+
+    use embassy_futures::block_on;
+    use embedded_io_async::{ErrorType, Read, Write};
+
+    use crate::io::test::{SliceRead, SliceWrite};
+    use crate::io::Error;
+    use crate::HeadersMismatchError;
+
+    use super::Connection;
+
+    /// A socket that reads from a fixed input and records what is written to it
+    struct Duplex<'a>(SliceRead<'a>, SliceWrite<'a>);
+
+    impl<'a> Duplex<'a> {
+        fn new(input: &'a [u8], output: &'a mut [u8]) -> Self {
+            Self(SliceRead(input), SliceWrite(output, 0))
+        }
+
+        fn output(&self) -> &str {
+            core::str::from_utf8(&self.1 .0[..self.1 .1]).unwrap()
+        }
+    }
+
+    impl ErrorType for Duplex<'_> {
+        type Error = Infallible;
+    }
+
+    impl Read for Duplex<'_> {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            self.0.read(buf).await
+        }
+    }
+
+    impl Write for Duplex<'_> {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            self.1.write(buf).await
+        }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    /// Answer the next request on `io`, and check that the connection is kept alive
+    async fn respond(
+        io: &mut Duplex<'_>,
+        status: u16,
+        reason: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Result<(), Error<Infallible>> {
+        let mut buf = [0; 256];
+        let mut connection = Connection::<_, 8>::new(&mut buf, io).await?;
+
+        connection
+            .initiate_response(status, Some(reason), headers)
+            .await?;
+        connection.write_all(body).await?;
+        connection.complete().await?;
+
+        assert!(!connection.needs_close());
+
+        Ok(())
+    }
+
+    const HEAD: &[u8] = b"HEAD / HTTP/1.1\r\n\r\n";
+    const HEAD_THEN_GET: &[u8] = b"HEAD / HTTP/1.1\r\n\r\nGET / HTTP/1.1\r\n\r\n";
+
+    #[test]
+    fn test_head_with_content_length() {
+        block_on(async {
+            let mut out = [0; 1024];
+            let mut io = Duplex::new(HEAD_THEN_GET, &mut out);
+
+            respond(&mut io, 200, "OK", &[("Content-Length", "5")], b"")
+                .await
+                .unwrap();
+            respond(&mut io, 200, "OK", &[("Content-Length", "5")], b"hello")
+                .await
+                .unwrap();
+
+            assert_eq!(
+                io.output(),
+                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: Keep-Alive\r\n\r\n\
+                 HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: Keep-Alive\r\n\r\nhello"
+            );
+        })
+    }
+
+    #[test]
+    fn test_head_without_body_type() {
+        block_on(async {
+            let mut out = [0; 1024];
+            let mut io = Duplex::new(HEAD_THEN_GET, &mut out);
+
+            // Both requests get the default response
+            for _ in 0..2 {
+                let mut buf = [0; 256];
+                let mut connection = Connection::<_, 8>::new(&mut buf, &mut io).await.unwrap();
+                connection.complete().await.unwrap();
+                assert!(!connection.needs_close());
+            }
+
+            assert_eq!(
+                io.output(),
+                "HTTP/1.1 200 OK\r\nConnection: Keep-Alive\r\n\r\n\
+                 HTTP/1.1 200 OK\r\nConnection: Keep-Alive\r\nTransfer-Encoding: Chunked\r\n\r\n0\r\n\r\n"
+            );
+        })
+    }
+
+    #[test]
+    fn test_head_body_write() {
+        block_on(async {
+            let mut out = [0; 1024];
+            let mut io = Duplex::new(HEAD, &mut out);
+
+            let mut buf = [0; 256];
+            let mut connection = Connection::<_, 8>::new(&mut buf, &mut io).await.unwrap();
+            connection
+                .initiate_response(200, Some("OK"), &[("Content-Length", "5")])
+                .await
+                .unwrap();
+
+            assert_eq!(connection.write(b"hello").await, Err(Error::TooLongBody));
+            assert_eq!(connection.write(b"").await, Ok(0));
+            connection.complete().await.unwrap();
+            assert!(!connection.needs_close());
+
+            assert_eq!(
+                io.output(),
+                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: Keep-Alive\r\n\r\n"
+            );
+        })
+    }
+
+    #[test]
+    fn test_head_chunked() {
+        block_on(async {
+            let mut out = [0; 1024];
+            let mut io = Duplex::new(HEAD, &mut out);
+
+            respond(&mut io, 200, "OK", &[("Transfer-Encoding", "chunked")], b"")
+                .await
+                .unwrap();
+
+            assert_eq!(
+                io.output(),
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: Keep-Alive\r\n\r\n"
+            );
+        })
+    }
+
+    #[test]
+    fn test_head_err() {
+        block_on(async {
+            let mut out = [0; 1024];
+            let mut io = Duplex::new(HEAD, &mut out);
+
+            let mut buf = [0; 256];
+            let mut connection = Connection::<_, 8>::new(&mut buf, &mut io).await.unwrap();
+            connection.complete_err("oops").await.unwrap();
+            assert!(connection.needs_close());
+
+            assert_eq!(
+                io.output(),
+                "HTTP/1.1 500 Internal Error\r\nConnection: Close\r\nContent-Type: text/plain\r\n\r\n"
+            );
+        })
+    }
+
+    const GET: &[u8] = b"GET / HTTP/1.1\r\n\r\n";
+    const GET_THEN_GET: &[u8] = b"GET / HTTP/1.1\r\n\r\nGET / HTTP/1.1\r\n\r\n";
+
+    #[test]
+    fn test_204() {
+        block_on(async {
+            let mut out = [0; 1024];
+            let mut io = Duplex::new(GET_THEN_GET, &mut out);
+
+            respond(&mut io, 204, "No Content", &[], b"").await.unwrap();
+            // `Content-Length: 0` from the handler is dropped
+            respond(&mut io, 204, "No Content", &[("Content-Length", "0")], b"")
+                .await
+                .unwrap();
+
+            assert_eq!(
+                io.output(),
+                "HTTP/1.1 204 No Content\r\nConnection: Keep-Alive\r\n\r\n\
+                 HTTP/1.1 204 No Content\r\nConnection: Keep-Alive\r\n\r\n"
+            );
+        })
+    }
+
+    #[test]
+    fn test_1xx_204_invalid_body_type() {
+        block_on(async {
+            for (status, headers) in [
+                (204, &[("Content-Length", "5")][..]),
+                (204, &[("Transfer-Encoding", "chunked")]),
+                // Every body type header is checked, not just the last one
+                (
+                    204,
+                    &[("Transfer-Encoding", "chunked"), ("Content-Length", "0")],
+                ),
+                (103, &[("Content-Length", "1")]),
+            ] {
+                let mut out = [0; 1024];
+                let mut io = Duplex::new(GET, &mut out);
+
+                let mut buf = [0; 256];
+                let mut connection = Connection::<_, 8>::new(&mut buf, &mut io).await.unwrap();
+                assert!(matches!(
+                    connection.initiate_response(status, None, headers).await,
+                    Err(Error::HeadersMismatchError(
+                        HeadersMismatchError::BodyTypeError(_)
+                    ))
+                ));
+                assert!(connection.is_request_initiated());
+
+                assert_eq!(io.output(), "");
+            }
+        })
+    }
+
+    #[test]
+    fn test_304_with_content_length() {
+        block_on(async {
+            let mut out = [0; 1024];
+            let mut io = Duplex::new(GET_THEN_GET, &mut out);
+
+            respond(
+                &mut io,
+                304,
+                "Not Modified",
+                &[("Content-Length", "5")],
+                b"",
+            )
+            .await
+            .unwrap();
+            respond(&mut io, 200, "OK", &[("Content-Length", "2")], b"hi")
+                .await
+                .unwrap();
+
+            assert_eq!(
+                io.output(),
+                "HTTP/1.1 304 Not Modified\r\nContent-Length: 5\r\nConnection: Keep-Alive\r\n\r\n\
+                 HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: Keep-Alive\r\n\r\nhi"
+            );
+        })
+    }
+
+    #[test]
+    fn test_get_short_body() {
+        block_on(async {
+            let mut out = [0; 1024];
+            let mut io = Duplex::new(GET, &mut out);
+
+            assert_eq!(
+                respond(&mut io, 200, "OK", &[("Content-Length", "5")], b"hi").await,
+                Err(Error::IncompleteBody)
+            );
+        })
+    }
+
+    #[test]
+    fn test_ws_upgrade_response() {
+        block_on(async {
+            let mut out = [0; 1024];
+            let mut io = Duplex::new(
+                b"GET /ws HTTP/1.1\r\nHost: example.com\r\nConnection: Upgrade\r\n\
+                  Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\
+                  Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+                &mut out,
+            );
+
+            let mut buf = [0; 256];
+            let mut connection = Connection::<_, 8>::new(&mut buf, &mut io).await.unwrap();
+            assert!(connection.is_ws_upgrade_request().unwrap());
+
+            let mut key_buf = [0; crate::ws::MAX_BASE64_KEY_RESPONSE_LEN];
+            connection
+                .initiate_ws_upgrade_response(&mut key_buf)
+                .await
+                .unwrap();
+            connection.complete().await.unwrap();
+
+            // RFC 6455's sample key
+            assert_eq!(
+                io.output(),
+                "HTTP/1.1 101 \r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+                 Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"
+            );
+        })
     }
 }

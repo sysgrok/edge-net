@@ -11,7 +11,7 @@ use crate::{
     ConnectionType, DEFAULT_MAX_HEADERS_COUNT,
 };
 
-use super::{send_headers, send_request, Body, Error, ResponseHeaders, SendBody};
+use super::{send_headers, send_request, Body, Error, Framing, ResponseHeaders, SendBody};
 
 use super::Method;
 
@@ -186,7 +186,15 @@ where
 
             let io = unwrap!(state.io.as_mut());
 
-            send_headers(headers, None, true, http11, true, &mut *io).await
+            send_headers(
+                headers,
+                None,
+                true,
+                http11,
+                Framing::ChunkedIfUnspecified,
+                &mut *io,
+            )
+            .await
         }
         .await;
 
@@ -196,6 +204,7 @@ where
                     buf: state.buf,
                     socket: state.socket,
                     addr: state.addr,
+                    method,
                     connection_type,
                     io: SendBody::new(body_type, unwrap!(state.io)),
                 });
@@ -268,19 +277,23 @@ where
         self.request_mut()?.io.finish().await?;
 
         let request_connection_type = self.request_mut()?.connection_type;
+        let method = self.request_mut()?.method;
 
         let mut state = self.unbind();
         let buf_ptr: *mut [u8] = state.buf;
         let mut response = ResponseHeaders::new();
 
-        match response
+        let result = response
             .receive(state.buf, &mut unwrap!(state.io.as_mut()), true)
             .await
-        {
-            Ok((buf, read_len)) => {
-                let (connection_type, body_type) =
-                    response.resolve::<T::Error>(request_connection_type)?;
+            .and_then(|(buf, read_len)| {
+                response
+                    .resolve_for_request(method, request_connection_type)
+                    .map(|types| (buf, read_len, types))
+            });
 
+        match result {
+            Ok((buf, read_len, (connection_type, body_type))) => {
                 let io = Body::new(body_type, buf, read_len, unwrap!(state.io));
 
                 *self = Self::Response(ResponseState {
@@ -449,6 +462,7 @@ where
     buf: &'b mut [u8],
     socket: &'b T,
     addr: SocketAddr,
+    method: Method,
     connection_type: ConnectionType,
     io: SendBody<T::Socket<'b>>,
 }
@@ -471,5 +485,237 @@ where
 {
     fn needs_close(&self) -> bool {
         matches!(self.connection_type, ConnectionType::Close) || self.io.needs_close()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::large_futures)]
+mod test {
+    use core::cell::RefCell;
+    use core::convert::Infallible;
+    use core::net::SocketAddr;
+
+    use embassy_futures::block_on;
+    use embedded_io_async::{ErrorType, Read, Write};
+
+    use edge_nal::{Close, Readable, TcpConnect, TcpShutdown, TcpSplit};
+
+    use crate::io::Error;
+    use crate::ws::{MAX_BASE64_KEY_LEN, MAX_BASE64_KEY_RESPONSE_LEN};
+    use crate::{HeadersMismatchError, Method};
+
+    use super::Connection;
+
+    struct Inner<'a> {
+        input: &'a [u8],
+        connects: usize,
+    }
+
+    /// A network whose sockets all read from one fixed input; writes are discarded
+    struct MockNet<'a>(RefCell<Inner<'a>>);
+
+    impl<'a> MockNet<'a> {
+        fn new(input: &'a [u8]) -> Self {
+            Self(RefCell::new(Inner { input, connects: 0 }))
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct MockSocket<'n, 'a>(&'n RefCell<Inner<'a>>);
+
+    impl<'a> TcpConnect for MockNet<'a> {
+        type Error = Infallible;
+
+        type Socket<'n>
+            = MockSocket<'n, 'a>
+        where
+            Self: 'n;
+
+        async fn connect(&self, _remote: SocketAddr) -> Result<Self::Socket<'_>, Self::Error> {
+            self.0.borrow_mut().connects += 1;
+
+            Ok(MockSocket(&self.0))
+        }
+    }
+
+    impl ErrorType for MockSocket<'_, '_> {
+        type Error = Infallible;
+    }
+
+    impl Read for MockSocket<'_, '_> {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            let mut inner = self.0.borrow_mut();
+            let len = core::cmp::min(buf.len(), inner.input.len());
+            buf[..len].copy_from_slice(&inner.input[..len]);
+            inner.input = &inner.input[len..];
+
+            Ok(len)
+        }
+    }
+
+    impl Write for MockSocket<'_, '_> {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            Ok(buf.len())
+        }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    impl Readable for MockSocket<'_, '_> {
+        async fn readable(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    impl<'n, 'a> TcpSplit for MockSocket<'n, 'a> {
+        type Read<'s>
+            = MockSocket<'n, 'a>
+        where
+            Self: 's;
+        type Write<'s>
+            = MockSocket<'n, 'a>
+        where
+            Self: 's;
+
+        fn split(&mut self) -> (Self::Read<'_>, Self::Write<'_>) {
+            (*self, *self)
+        }
+    }
+
+    impl TcpShutdown for MockSocket<'_, '_> {
+        async fn close(&mut self, _what: Close) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn abort(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    const ADDR: SocketAddr =
+        SocketAddr::new(core::net::IpAddr::V4(core::net::Ipv4Addr::LOCALHOST), 80);
+
+    /// Send a `method` request on `connection` and read the whole response body into `body`
+    async fn request(
+        connection: &mut Connection<'_, MockNet<'_>, 8>,
+        method: Method,
+        body: &mut [u8],
+    ) -> Result<(u16, usize), Error<Infallible>> {
+        connection.initiate_request(true, method, "/", &[]).await?;
+        connection.initiate_response().await?;
+
+        let code = connection.headers()?.code;
+        let (_, response_body) = connection.split();
+        let mut len = 0;
+        loop {
+            let n = response_body.read(&mut body[len..]).await?;
+            if n == 0 {
+                break;
+            }
+            len += n;
+        }
+
+        connection.complete().await?;
+
+        Ok((code, len))
+    }
+
+    #[test]
+    fn test_responses_without_body() {
+        block_on(async {
+            let net = MockNet::new(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n\
+                  HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n\
+                  HTTP/1.1 304 Not Modified\r\nContent-Length: 5\r\n\r\n\
+                  HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+            );
+
+            let mut buf = [0; 512];
+            let mut connection = Connection::<_, 8>::new(&mut buf, &net, ADDR);
+            let mut body = [0; 16];
+
+            assert_eq!(
+                request(&mut connection, Method::Head, &mut body).await,
+                Ok((200, 0))
+            );
+            assert_eq!(
+                request(&mut connection, Method::Get, &mut body).await,
+                Ok((204, 0))
+            );
+            assert_eq!(
+                request(&mut connection, Method::Get, &mut body).await,
+                Ok((304, 0))
+            );
+
+            assert_eq!(
+                request(&mut connection, Method::Get, &mut body).await,
+                Ok((200, 5))
+            );
+            assert_eq!(&body[..5], b"hello");
+
+            assert_eq!(net.0.borrow().connects, 1);
+        })
+    }
+
+    #[test]
+    fn test_interim_response() {
+        block_on(async {
+            let net = MockNet::new(b"HTTP/1.1 100 Continue\r\n\r\n");
+
+            let mut buf = [0; 512];
+            let mut connection = Connection::<_, 8>::new(&mut buf, &net, ADDR);
+
+            connection
+                .initiate_request(true, Method::Get, "/", &[])
+                .await
+                .unwrap();
+            assert!(matches!(
+                connection.initiate_response().await,
+                Err(Error::HeadersMismatchError(
+                    HeadersMismatchError::BodyTypeError(_)
+                ))
+            ));
+
+            // The connection is left unbound and can still be completed
+            assert!(!connection.is_request_initiated());
+            assert!(!connection.is_response_initiated());
+            connection.complete().await.unwrap();
+        })
+    }
+
+    #[test]
+    fn test_ws_upgrade_response() {
+        block_on(async {
+            // RFC 6455's sample nonce and the matching accept key
+            let nonce = *b"the sample nonce";
+            let net = MockNet::new(
+                b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\n\
+                  Upgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\nws",
+            );
+
+            let mut buf = [0; 512];
+            let mut connection = Connection::<_, 8>::new(&mut buf, &net, ADDR);
+            let mut key_buf = [0; MAX_BASE64_KEY_LEN];
+            connection
+                .initiate_ws_upgrade_request(None, None, "/ws", None, &nonce, &mut key_buf)
+                .await
+                .unwrap();
+            connection.initiate_response().await.unwrap();
+
+            let mut accept_buf = [0; MAX_BASE64_KEY_RESPONSE_LEN];
+            assert!(connection
+                .is_ws_upgrade_accepted(&nonce, &mut accept_buf)
+                .unwrap());
+
+            // The bytes after the 101 are left for the new protocol
+            let mut data = [0; 8];
+            let (_, body) = connection.split();
+            assert_eq!(body.read(&mut data).await, Ok(0));
+            let socket = connection.raw_connection().unwrap();
+            assert_eq!(socket.read(&mut data).await, Ok(2));
+            assert_eq!(&data[..2], b"ws");
+        })
     }
 }

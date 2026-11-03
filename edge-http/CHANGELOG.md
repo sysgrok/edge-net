@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * Unit tests for `Method`, `Headers`, the connection and body type resolution, the WebSocket upgrade helpers, and the request/response header and body I/O
 * Fix: reduce the memory taken by the HTTP server by 2x (#105)
 * Breaking: fix a panic on an invalid `Content-Length` header; `BodyType::from_header(s)` and `Headers::content_len` now return a `Result` (#109)
+* Fix: `io::server::Connection` and `io::client::Connection` no longer expect a body after a response to HEAD, or a 1xx, 204 or 304 response; writing a body to such a response fails with `TooLongBody`; the client rejects interim 1xx responses, which it did not handle before
+* Breaking: the server rejects a 1xx or 204 response with `Transfer-Encoding` or a non-zero `Content-Length`, and drops `Content-Length: 0` from it
+* Breaking: `ws::upgrade_response_headers` no longer returns `Content-Length: 0`; `UPGRADE_RESPONSE_HEADERS_LEN` is now 3
 
 ## [0.8.0] - 2026-06-25
 * Breaking: update the `edge-nal` dependency

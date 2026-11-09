@@ -29,6 +29,7 @@ icmp = ["embassy-net/icmp"]
 multicast = ["embassy-net/multicast"]
 dhcpv4 = ["embassy-net/dhcpv4"]
 dhcpv4-hostname = ["embassy-net/dhcpv4-hostname"]
+slaac = ["proto-ipv6", "embassy-net/slaac"]
 
 [dependencies]
 log = { workspace = true, default-features = false, optional = true }

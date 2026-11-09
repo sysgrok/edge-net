@@ -9,12 +9,12 @@ use edge_nal::{
 use embedded_io_async::{ErrorType, Read, Write};
 
 use super::{
-    check_no_framing_headers, response_has_no_body, send_headers, send_status, Body, Error,
-    Framing, RequestHeaders, SendBody,
+    check_no_framing_headers, is_interim, response_has_no_body, send_headers, send_status, Body,
+    Error, Framing, RequestHeaders, SendBody,
 };
 
 use crate::ws::{upgrade_response_headers, MAX_BASE64_KEY_RESPONSE_LEN};
-use crate::{ConnectionType, DEFAULT_MAX_HEADERS_COUNT};
+use crate::{ConnectionType, HeadersMismatchError, Method, DEFAULT_MAX_HEADERS_COUNT};
 
 pub const DEFAULT_HANDLER_TASKS_COUNT: usize = 4;
 pub const DEFAULT_BUF_SIZE: usize = 2048;
@@ -88,11 +88,13 @@ where
     /// Switch the connection into a response state
     ///
     /// Parameters:
-    /// - `status`: The HTTP status code
+    /// - `status`: The HTTP status code; interim 1xx codes (all but 101) are not supported
     /// - `message`: An optional HTTP status message
     /// - `headers`: An array of HTTP response headers.
     ///   Note that if no `Content-Length` or `Transfer-Encoding` headers are provided,
     ///   the body will be send with chunked encoding (for HTTP1.1 only and if the connection is not Close)
+    ///
+    /// A response to HEAD, and a 1xx, 204 or 304 response, has no body.
     pub async fn initiate_response(
         &mut self,
         status: u16,
@@ -141,7 +143,7 @@ where
             Ok(request) => {
                 let headers = [("Connection", "Close"), ("Content-Type", "text/plain")];
 
-                let no_body = response_has_no_body(request.request.method, 500);
+                let no_body = request.request.method == Method::Head;
 
                 self.complete_request(500, Some("Internal Error"), &headers)
                     .await?;
@@ -186,6 +188,14 @@ where
         headers: &[(&str, &str)],
     ) -> Result<(), Error<T::Error>> {
         let request = self.request_mut()?;
+
+        if is_interim(status) {
+            // Only the final response can be sent
+            warn!("Interim 1xx response. This is not supported.");
+            Err(HeadersMismatchError::BodyTypeError(
+                "Interim 1xx response. This is not supported.",
+            ))?;
+        }
 
         let forbids_framing_headers = matches!(status, 100..=199 | 204);
 
@@ -1241,7 +1251,7 @@ mod test {
                     204,
                     &[("Transfer-Encoding", "chunked"), ("Content-Length", "0")],
                 ),
-                (103, &[("Content-Length", "1")]),
+                (101, &[("Content-Length", "1")]),
             ] {
                 let mut out = [0; 1024];
                 let mut io = Duplex::new(GET, &mut out);
@@ -1250,6 +1260,28 @@ mod test {
                 let mut connection = Connection::<_, 8>::new(&mut buf, &mut io).await.unwrap();
                 assert!(matches!(
                     connection.initiate_response(status, None, headers).await,
+                    Err(Error::HeadersMismatchError(
+                        HeadersMismatchError::BodyTypeError(_)
+                    ))
+                ));
+                assert!(connection.is_request_initiated());
+
+                assert_eq!(io.output(), "");
+            }
+        })
+    }
+
+    #[test]
+    fn test_interim() {
+        block_on(async {
+            for status in [100, 103] {
+                let mut out = [0; 1024];
+                let mut io = Duplex::new(GET, &mut out);
+
+                let mut buf = [0; 256];
+                let mut connection = Connection::<_, 8>::new(&mut buf, &mut io).await.unwrap();
+                assert!(matches!(
+                    connection.initiate_response(status, None, &[]).await,
                     Err(Error::HeadersMismatchError(
                         HeadersMismatchError::BodyTypeError(_)
                     ))

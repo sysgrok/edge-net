@@ -287,13 +287,6 @@ impl<'b, const N: usize> ResponseHeaders<'b, N> {
         request_connection_type: ConnectionType,
     ) -> Result<(ConnectionType, BodyType), Error<E>> {
         let framing = if response_has_no_body(method, self.code) {
-            if matches!(self.code, 100..=199) && self.code != 101 {
-                warn!("Interim 1xx response. This is not supported.");
-                Err(HeadersMismatchError::BodyTypeError(
-                    "Interim 1xx response. This is not supported.",
-                ))?;
-            }
-
             Framing::NoBody
         } else {
             Framing::Default
@@ -329,6 +322,11 @@ impl<'b, const N: usize> ResponseHeaders<'b, N> {
 
 pub(crate) fn response_has_no_body(method: Method, status: u16) -> bool {
     method == Method::Head || matches!(status, 100..=199 | 204 | 304)
+}
+
+/// Whether `status` is an interim response, which a final response follows
+pub(crate) const fn is_interim(status: u16) -> bool {
+    matches!(status, 100 | 102..=199)
 }
 
 /// Check that the headers of a 1xx or 204 response carry no `Transfer-Encoding`, and no

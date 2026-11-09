@@ -10,9 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * Fix: reduce the memory taken by the HTTP server by 2x (#105)
 * Breaking: fix a panic on an invalid `Content-Length` header; `BodyType::from_header(s)` and `Headers::content_len` now return a `Result` (#109)
 * Fix: the HTTP server builds its tasks in place rather than on the stack first, so it takes less stack
-* Fix: `io::server::Connection` and `io::client::Connection` no longer expect a body after a response to HEAD, or a 1xx, 204 or 304 response; writing a body to such a response fails with `TooLongBody`; the client rejects interim 1xx responses, which it did not handle before
-* Breaking: the server rejects a 1xx or 204 response with `Transfer-Encoding` or a non-zero `Content-Length`, and drops `Content-Length: 0` from it
-* Breaking: `ws::upgrade_response_headers` no longer returns `Content-Length: 0`; `UPGRADE_RESPONSE_HEADERS_LEN` is now 3
+* Fix: `io::server::Connection` and `io::client::Connection` no longer expect a body after a response to HEAD, or a 1xx, 204 or 304 response; writing a body to such a response fails with `TooLongBody`; the client rejects interim 1xx responses, which it did not handle before (#111)
+* Fix: HEAD, 1xx, 204 and 304 responses are sent and read without a body; the client skips interim 1xx responses (#111)
+* Breaking: the server rejects interim 1xx responses, and body headers in 1xx and 204 responses (#111)
+* Breaking: `ws::upgrade_response_headers` no longer returns `Content-Length: 0` (#111)
 
 ## [0.8.0] - 2026-06-25
 * Breaking: update the `edge-nal` dependency

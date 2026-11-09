@@ -11,7 +11,9 @@ use crate::{
     ConnectionType, DEFAULT_MAX_HEADERS_COUNT,
 };
 
-use super::{send_headers, send_request, Body, Error, Framing, ResponseHeaders, SendBody};
+use super::{
+    is_interim, send_headers, send_request, Body, Error, Framing, ResponseHeaders, SendBody,
+};
 
 use super::Method;
 
@@ -281,19 +283,35 @@ where
 
         let mut state = self.unbind();
         let buf_ptr: *mut [u8] = state.buf;
-        let mut response = ResponseHeaders::new();
 
-        let result = response
-            .receive(state.buf, &mut unwrap!(state.io.as_mut()), true)
-            .await
-            .and_then(|(buf, read_len)| {
-                response
-                    .resolve_for_request(method, request_connection_type)
-                    .map(|types| (buf, read_len, types))
-            });
+        let result = loop {
+            // Fresh headers each time, so none from an interim response remain
+            let mut response = ResponseHeaders::new();
+
+            // The headers are read exactly, so the next response is not in `buf` yet
+            let received = response
+                .receive(
+                    unwrap!(unsafe { buf_ptr.as_mut() }),
+                    &mut unwrap!(state.io.as_mut()),
+                    true,
+                )
+                .await;
+
+            match received {
+                Ok(_) if is_interim(response.code) => {
+                    debug!("Skipping interim response {}", response.code);
+                }
+                Ok((buf, read_len)) => {
+                    break response
+                        .resolve_for_request(method, request_connection_type)
+                        .map(|types| (response, buf, read_len, types));
+                }
+                Err(e) => break Err(e),
+            }
+        };
 
         match result {
-            Ok((buf, read_len, (connection_type, body_type))) => {
+            Ok((response, buf, read_len, (connection_type, body_type))) => {
                 let io = Body::new(body_type, buf, read_len, unwrap!(state.io));
 
                 *self = Self::Response(ResponseState {
@@ -502,7 +520,7 @@ mod test {
 
     use crate::io::Error;
     use crate::ws::{MAX_BASE64_KEY_LEN, MAX_BASE64_KEY_RESPONSE_LEN};
-    use crate::{HeadersMismatchError, Method};
+    use crate::Method;
 
     use super::Connection;
 
@@ -660,7 +678,39 @@ mod test {
     }
 
     #[test]
-    fn test_interim_response() {
+    fn test_interim_responses() {
+        block_on(async {
+            let net = MockNet::new(
+                b"HTTP/1.1 100 Continue\r\n\r\n\
+                  HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n\
+                  HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+            );
+
+            let mut buf = [0; 512];
+            let mut connection = Connection::<_, 8>::new(&mut buf, &net, ADDR);
+            let mut body = [0; 16];
+
+            connection
+                .initiate_request(true, Method::Get, "/", &[])
+                .await
+                .unwrap();
+            connection.initiate_response().await.unwrap();
+
+            // Only the headers of the final response are seen
+            let headers = connection.headers().unwrap();
+            assert_eq!(headers.code, 200);
+            assert_eq!(headers.headers.get("Link"), None);
+            assert_eq!(headers.headers.content_len(), Ok(Some(5)));
+
+            let (_, response_body) = connection.split();
+            assert_eq!(response_body.read(&mut body).await, Ok(5));
+            assert_eq!(&body[..5], b"hello");
+            connection.complete().await.unwrap();
+        })
+    }
+
+    #[test]
+    fn test_interim_response_only() {
         block_on(async {
             let net = MockNet::new(b"HTTP/1.1 100 Continue\r\n\r\n");
 
@@ -671,12 +721,10 @@ mod test {
                 .initiate_request(true, Method::Get, "/", &[])
                 .await
                 .unwrap();
-            assert!(matches!(
+            assert_eq!(
                 connection.initiate_response().await,
-                Err(Error::HeadersMismatchError(
-                    HeadersMismatchError::BodyTypeError(_)
-                ))
-            ));
+                Err(Error::ConnectionClosed)
+            );
 
             // The connection is left unbound and can still be completed
             assert!(!connection.is_request_initiated());

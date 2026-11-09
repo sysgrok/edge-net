@@ -980,7 +980,7 @@ pub mod ws {
     pub const MAX_BASE64_KEY_RESPONSE_LEN: usize = 33;
 
     pub const UPGRADE_REQUEST_HEADERS_LEN: usize = 7;
-    pub const UPGRADE_RESPONSE_HEADERS_LEN: usize = 4;
+    pub const UPGRADE_RESPONSE_HEADERS_LEN: usize = 3;
 
     /// Return ready-to-use WS upgrade request headers
     ///
@@ -1100,7 +1100,6 @@ pub mod ws {
         if version_ok {
             if let Some(sec_key_resp_len) = sec_key_resp_len {
                 Ok([
-                    ("Content-Length", "0"),
                     ("Connection", "Upgrade"),
                     ("Upgrade", "websocket"),
                     (
@@ -1774,10 +1773,9 @@ mod test {
 
         let mut resp_buf = [0u8; MAX_BASE64_KEY_RESPONSE_LEN];
         let response = upgrade_response_headers(request, None, &mut resp_buf).unwrap();
-        assert_eq!(response[0], ("Content-Length", "0"));
-        assert_eq!(response[1], ("Connection", "Upgrade"));
-        assert_eq!(response[2], ("Upgrade", "websocket"));
-        assert_eq!(response[3].0, "Sec-WebSocket-Accept");
+        assert_eq!(response[0], ("Connection", "Upgrade"));
+        assert_eq!(response[1], ("Upgrade", "websocket"));
+        assert_eq!(response[2].0, "Sec-WebSocket-Accept");
 
         let mut accept_buf = [0u8; MAX_BASE64_KEY_RESPONSE_LEN];
         assert!(is_upgrade_accepted(101, response, &nonce, &mut accept_buf));

@@ -198,7 +198,8 @@ impl<'b, const N: usize> RequestHeaders<'b, N> {
 
     /// Resolve the connection type and body type from the headers
     pub fn resolve<E>(&self) -> Result<(ConnectionType, BodyType), Error<E>> {
-        self.headers.resolve::<E>(None, true, self.http11)
+        self.headers
+            .resolve::<E>(None, true, self.http11, Framing::Default)
     }
 
     /// Send the headers to the output stream, returning the connection type and body type
@@ -213,7 +214,13 @@ impl<'b, const N: usize> RequestHeaders<'b, N> {
         send_request(self.http11, self.method, self.path, &mut output).await?;
 
         self.headers
-            .send(None, true, self.http11, chunked_if_unspecified, output)
+            .send(
+                None,
+                true,
+                self.http11,
+                Framing::from_chunked_if_unspecified(chunked_if_unspecified),
+                output,
+            )
             .await
     }
 }
@@ -265,8 +272,28 @@ impl<'b, const N: usize> ResponseHeaders<'b, N> {
         &self,
         request_connection_type: ConnectionType,
     ) -> Result<(ConnectionType, BodyType), Error<E>> {
+        self.headers.resolve::<E>(
+            Some(request_connection_type),
+            false,
+            self.http11,
+            Framing::Default,
+        )
+    }
+
+    /// Like `resolve`, but a response that has no body resolves to an empty body.
+    pub(crate) fn resolve_for_request<E>(
+        &self,
+        method: Method,
+        request_connection_type: ConnectionType,
+    ) -> Result<(ConnectionType, BodyType), Error<E>> {
+        let framing = if response_has_no_body(method, self.code) {
+            Framing::NoBody
+        } else {
+            Framing::Default
+        };
+
         self.headers
-            .resolve::<E>(Some(request_connection_type), false, self.http11)
+            .resolve::<E>(Some(request_connection_type), false, self.http11, framing)
     }
 
     /// Send the headers to the output stream, returning the connection type and body type
@@ -286,10 +313,93 @@ impl<'b, const N: usize> ResponseHeaders<'b, N> {
                 Some(request_connection_type),
                 false,
                 self.http11,
-                chunked_if_unspecified,
+                Framing::from_chunked_if_unspecified(chunked_if_unspecified),
                 output,
             )
             .await
+    }
+}
+
+pub(crate) fn response_has_no_body(method: Method, status: u16) -> bool {
+    method == Method::Head || matches!(status, 100..=199 | 204 | 304)
+}
+
+/// Whether `status` is an interim response, which a final response follows
+pub(crate) const fn is_interim(status: u16) -> bool {
+    matches!(status, 100 | 102..=199)
+}
+
+/// Check that the headers of a 1xx or 204 response carry no `Transfer-Encoding`, and no
+/// `Content-Length` other than 0 (RFC 9110 §8.6)
+pub(crate) fn check_no_framing_headers<E>(headers: &[(&str, &str)]) -> Result<(), Error<E>> {
+    for (name, value) in headers {
+        if "Transfer-Encoding".eq_ignore_ascii_case(name) {
+            warn!("Transfer-Encoding in a 1xx or 204 response. This is not allowed.");
+            Err(HeadersMismatchError::BodyTypeError(
+                "Transfer-Encoding in a 1xx or 204 response. This is not allowed.",
+            ))?;
+        }
+
+        if !matches!(
+            BodyType::from_header(name, value)?,
+            None | Some(BodyType::ContentLen(0))
+        ) {
+            warn!("Non-zero Content-Length in a 1xx or 204 response. This is not allowed.");
+            Err(HeadersMismatchError::BodyTypeError(
+                "Non-zero Content-Length in a 1xx or 204 response. This is not allowed.",
+            ))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// How to choose the body framing of a message when sending or receiving its headers
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Framing {
+    /// Use the body type the headers declare, or the default for the connection type
+    Default,
+    /// As `Default`, but use chunked encoding (HTTP/1.1 only) if the headers declare no body type
+    ChunkedIfUnspecified,
+    /// The message has no body whatever its headers say; no body type header is added
+    NoBody,
+}
+
+impl Framing {
+    pub(crate) const fn from_chunked_if_unspecified(chunked_if_unspecified: bool) -> Self {
+        if chunked_if_unspecified {
+            Self::ChunkedIfUnspecified
+        } else {
+            Self::Default
+        }
+    }
+}
+
+impl BodyType {
+    fn resolve_with_framing(
+        headers_body_type: Option<BodyType>,
+        connection_type: ConnectionType,
+        request: bool,
+        http11: bool,
+        framing: Framing,
+    ) -> Result<Self, HeadersMismatchError> {
+        match framing {
+            Framing::NoBody => {
+                if headers_body_type.is_some() {
+                    // Reject what would be invalid with a body too, e.g. chunked on HTTP/1.0
+                    Self::resolve(headers_body_type, connection_type, request, http11, false)?;
+                }
+
+                Ok(Self::ContentLen(0))
+            }
+            _ => Self::resolve(
+                headers_body_type,
+                connection_type,
+                request,
+                http11,
+                framing == Framing::ChunkedIfUnspecified,
+            ),
+        }
     }
 }
 
@@ -352,7 +462,7 @@ pub(crate) async fn send_headers<'a, H, W>(
     carry_over_connection_type: Option<ConnectionType>,
     request: bool,
     http11: bool,
-    chunked_if_unspecified: bool,
+    framing: Framing,
     mut output: W,
 ) -> Result<(ConnectionType, BodyType), Error<W::Error>>
 where
@@ -373,7 +483,7 @@ where
         carry_over_connection_type,
         request,
         http11,
-        chunked_if_unspecified,
+        framing,
         output,
     )
     .await
@@ -385,7 +495,7 @@ async fn send_headers_end<W>(
     carry_over_connection_type: Option<ConnectionType>,
     request: bool,
     http11: bool,
-    chunked_if_unspecified: bool,
+    framing: Framing,
     mut output: W,
 ) -> Result<(ConnectionType, BodyType), Error<W::Error>>
 where
@@ -394,12 +504,12 @@ where
     let connection_type =
         ConnectionType::resolve(headers_connection_type, carry_over_connection_type, http11)?;
 
-    let body_type = BodyType::resolve(
+    let body_type = BodyType::resolve_with_framing(
         headers_body_type,
         connection_type,
         request,
         http11,
-        chunked_if_unspecified,
+        framing,
     )?;
 
     if headers_connection_type.is_none() {
@@ -409,7 +519,7 @@ where
         raw::send_header(name, value, &mut output).await?;
     }
 
-    if headers_body_type.is_none() {
+    if headers_body_type.is_none() && framing != Framing::NoBody {
         let mut buf = heapless::String::new();
 
         if let Some((name, value)) = body_type.raw_header(&mut buf) {
@@ -429,14 +539,20 @@ impl<const N: usize> Headers<'_, N> {
         carry_over_connection_type: Option<ConnectionType>,
         request: bool,
         http11: bool,
+        framing: Framing,
     ) -> Result<(ConnectionType, BodyType), Error<E>> {
         let headers_connection_type = ConnectionType::from_headers(self.iter());
         let headers_body_type = BodyType::from_headers(self.iter())?;
 
         let connection_type =
             ConnectionType::resolve(headers_connection_type, carry_over_connection_type, http11)?;
-        let body_type =
-            BodyType::resolve(headers_body_type, connection_type, request, http11, false)?;
+        let body_type = BodyType::resolve_with_framing(
+            headers_body_type,
+            connection_type,
+            request,
+            http11,
+            framing,
+        )?;
 
         Ok((connection_type, body_type))
     }
@@ -446,7 +562,7 @@ impl<const N: usize> Headers<'_, N> {
         carry_over_connection_type: Option<ConnectionType>,
         request: bool,
         http11: bool,
-        chunked_if_unspecified: bool,
+        framing: Framing,
         mut output: W,
     ) -> Result<(ConnectionType, BodyType), Error<W::Error>>
     where
@@ -461,7 +577,7 @@ impl<const N: usize> Headers<'_, N> {
             carry_over_connection_type,
             request,
             http11,
-            chunked_if_unspecified,
+            framing,
             output,
         )
         .await
@@ -1309,7 +1425,7 @@ mod raw {
 
 #[cfg(test)]
 #[allow(clippy::large_futures)]
-mod test {
+pub(crate) mod test {
     use core::convert::Infallible;
 
     use embassy_futures::block_on;
@@ -1317,7 +1433,7 @@ mod test {
 
     use super::*;
 
-    struct SliceWrite<'a>(&'a mut [u8], usize);
+    pub(crate) struct SliceWrite<'a>(pub(crate) &'a mut [u8], pub(crate) usize);
 
     impl ErrorType for SliceWrite<'_> {
         type Error = Infallible;
@@ -1336,7 +1452,7 @@ mod test {
         }
     }
 
-    struct SliceRead<'a>(&'a [u8]);
+    pub(crate) struct SliceRead<'a>(pub(crate) &'a [u8]);
 
     impl<'a> ErrorType for SliceRead<'a> {
         type Error = core::convert::Infallible;

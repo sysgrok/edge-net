@@ -720,32 +720,35 @@ impl<const P: usize, const B: usize, const N: usize> Server<P, B, N> {
             let handler = &handler;
             let buf: *mut [u8; B] = &mut unsafe { self.0.assume_init_mut() }[index];
 
-            unwrap!(tasks
-                .push(async move {
-                    loop {
-                        debug!(
-                            "Handler task {}: Waiting for connection",
-                            display2format!(task_id)
-                        );
+            let task = async move {
+                loop {
+                    debug!(
+                        "Handler task {}: Waiting for connection",
+                        display2format!(task_id)
+                    );
 
-                        let io = acceptor.accept().await.map_err(Error::Io)?.1;
+                    let io = acceptor.accept().await.map_err(Error::Io)?.1;
 
-                        debug!(
-                            "Handler task {}: Got connection request",
-                            display2format!(task_id)
-                        );
+                    debug!(
+                        "Handler task {}: Got connection request",
+                        display2format!(task_id)
+                    );
 
-                        handle_connection::<_, _, N>(
-                            io,
-                            unwrap!(unsafe { buf.as_mut() }),
-                            keepalive_timeout_ms,
-                            task_id,
-                            handler,
-                        )
-                        .await;
-                    }
-                })
-                .map_err(|_| ()));
+                    handle_connection::<_, _, N>(
+                        io,
+                        unwrap!(unsafe { buf.as_mut() }),
+                        keepalive_timeout_ms,
+                        task_id,
+                        handler,
+                    )
+                    .await;
+                }
+            };
+
+            // SAFETY: There is room for `P` tasks. Unlike `push`, which can
+            // hand the task back, `push_unchecked` lets it be built in place,
+            // rather than on the stack first.
+            unsafe { tasks.push_unchecked(task) };
         }
 
         let tasks = unsafe { core::pin::Pin::new_unchecked(tasks.as_mut_slice()) };
@@ -851,47 +854,50 @@ impl<const P: usize, const B: usize, const N: usize> Server<P, B, N> {
             let acceptor = &acceptor;
             let socket_queue = &socket_queue;
 
-            unwrap!(acceptor_tasks
-                .push(async move {
-                    loop {
-                        // Wait for signal that a socket is available
-                        // Initially all signals are ready, allowing Q concurrent accepts
-                        signal.wait().await;
+            let task = async move {
+                loop {
+                    // Wait for signal that a socket is available
+                    // Initially all signals are ready, allowing Q concurrent accepts
+                    signal.wait().await;
 
-                        debug!(
-                            "Acceptor task {}: Got signal, waiting for connection",
-                            display2format!(acceptor_id)
-                        );
+                    debug!(
+                        "Acceptor task {}: Got signal, waiting for connection",
+                        display2format!(acceptor_id)
+                    );
 
-                        match acceptor.accept().await {
-                            Ok((_, io)) => {
-                                debug!(
-                                    "Acceptor task {}: Got connection, enqueueing",
-                                    display2format!(acceptor_id)
-                                );
+                    match acceptor.accept().await {
+                        Ok((_, io)) => {
+                            debug!(
+                                "Acceptor task {}: Got connection, enqueueing",
+                                display2format!(acceptor_id)
+                            );
 
-                                // Send the socket along with the acceptor ID to the queue
-                                // This allows workers to signal the correct acceptor when done
-                                socket_queue.send((io, acceptor_id)).await;
+                            // Send the socket along with the acceptor ID to the queue
+                            // This allows workers to signal the correct acceptor when done
+                            socket_queue.send((io, acceptor_id)).await;
 
-                                debug!(
-                                    "Acceptor task {}: Connection enqueued",
-                                    display2format!(acceptor_id)
-                                );
-                            }
-                            Err(e) => {
-                                warn!(
-                                    "Acceptor task {}: Error accepting connection: {:?}",
-                                    display2format!(acceptor_id),
-                                    debug2format!(e)
-                                );
-                                // Signal ourselves again to retry
-                                signal.signal(());
-                            }
+                            debug!(
+                                "Acceptor task {}: Connection enqueued",
+                                display2format!(acceptor_id)
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Acceptor task {}: Error accepting connection: {:?}",
+                                display2format!(acceptor_id),
+                                debug2format!(e)
+                            );
+                            // Signal ourselves again to retry
+                            signal.signal(());
                         }
                     }
-                })
-                .map_err(|_| ()));
+                }
+            };
+
+            // SAFETY: There is room for `Q` tasks. Unlike `push`, which can
+            // hand the task back, `push_unchecked` lets it be built in place,
+            // rather than on the stack first.
+            unsafe { acceptor_tasks.push_unchecked(task) };
         }
 
         // Initially signal all acceptors to start accepting
@@ -912,44 +918,47 @@ impl<const P: usize, const B: usize, const N: usize> Server<P, B, N> {
             // The pointer remains valid for the lifetime of the server and the buffer is not moved.
             let buf: *mut [u8; B] = &mut unsafe { self.0.assume_init_mut() }[index];
 
-            unwrap!(worker_tasks
-                .push(async move {
-                    loop {
-                        debug!(
-                            "Worker task {}: Waiting for connection from queue",
-                            display2format!(task_id)
-                        );
+            let task = async move {
+                loop {
+                    debug!(
+                        "Worker task {}: Waiting for connection from queue",
+                        display2format!(task_id)
+                    );
 
-                        // Receive an accepted socket from the queue along with the acceptor ID
-                        let (io, acceptor_id) = socket_queue.receive().await;
+                    // Receive an accepted socket from the queue along with the acceptor ID
+                    let (io, acceptor_id) = socket_queue.receive().await;
 
-                        debug!(
-                            "Worker task {}: Got connection from acceptor {} from queue",
-                            display2format!(task_id),
-                            display2format!(acceptor_id)
-                        );
+                    debug!(
+                        "Worker task {}: Got connection from acceptor {} from queue",
+                        display2format!(task_id),
+                        display2format!(acceptor_id)
+                    );
 
-                        handle_connection::<_, _, N>(
-                            io,
-                            unwrap!(unsafe { buf.as_mut() }),
-                            keepalive_timeout_ms,
-                            task_id,
-                            handler,
-                        )
-                        .await;
+                    handle_connection::<_, _, N>(
+                        io,
+                        unwrap!(unsafe { buf.as_mut() }),
+                        keepalive_timeout_ms,
+                        task_id,
+                        handler,
+                    )
+                    .await;
 
-                        // Signal the specific acceptor that provided this socket
-                        // This ensures we signal an acceptor that's waiting on its signal,
-                        // not one that might be busy waiting on accept()
-                        debug!(
-                            "Worker task {}: Finished processing, signaling acceptor {}",
-                            display2format!(task_id),
-                            display2format!(acceptor_id)
-                        );
-                        accept_signals[acceptor_id].signal(());
-                    }
-                })
-                .map_err(|_| ()));
+                    // Signal the specific acceptor that provided this socket
+                    // This ensures we signal an acceptor that's waiting on its signal,
+                    // not one that might be busy waiting on accept()
+                    debug!(
+                        "Worker task {}: Finished processing, signaling acceptor {}",
+                        display2format!(task_id),
+                        display2format!(acceptor_id)
+                    );
+                    accept_signals[acceptor_id].signal(());
+                }
+            };
+
+            // SAFETY: There is room for `P` tasks. Unlike `push`, which can
+            // hand the task back, `push_unchecked` lets it be built in place,
+            // rather than on the stack first.
+            unsafe { worker_tasks.push_unchecked(task) };
         }
 
         // Pin tasks for select_slice

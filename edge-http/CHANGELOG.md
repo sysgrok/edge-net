@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+* Fix: the HTTP server and client abort a connection whose close fails, for example on a timeout, so that the peer gets a reset instead of a connection that is never closed
 * Unit tests for `Method`, `Headers`, the connection and body type resolution, the WebSocket upgrade helpers, and the request/response header and body I/O
 * Fix: reduce the memory taken by the HTTP server by 2x (#105)
 * Breaking: fix a panic on an invalid `Content-Length` header; `BodyType::from_header(s)` and `Headers::content_len` now return a `Result` (#109)

@@ -560,6 +560,9 @@ pub async fn handle_connection<H, T, const N: usize>(
                 display2format!(task_id),
                 debug2format!(e)
             );
+
+            // Reset the connection instead, so that the peer does not keep it open
+            let _ = io.abort().await;
         }
     } else {
         let _ = io.abort().await;
@@ -1045,16 +1048,20 @@ impl<const P: usize, const B: usize, const N: usize> Default for Server<P, B, N>
 #[cfg(test)]
 #[allow(clippy::large_futures)]
 mod test {
+    use core::cell::RefCell;
     use core::convert::Infallible;
+    use core::fmt::{Debug, Display};
 
     use embassy_futures::block_on;
-    use embedded_io_async::{ErrorType, Read, Write};
+    use embedded_io_async::{ErrorKind, ErrorType, Read, Write};
+
+    use edge_nal::{Close, Readable, TcpShutdown, TcpSplit};
 
     use crate::io::test::{SliceRead, SliceWrite};
     use crate::io::Error;
     use crate::HeadersMismatchError;
 
-    use super::Connection;
+    use super::{handle_connection, Connection, Handler};
 
     /// A socket that reads from a fixed input and records what is written to it
     struct Duplex<'a>(SliceRead<'a>, SliceWrite<'a>);
@@ -1086,6 +1093,106 @@ mod test {
 
         async fn flush(&mut self) -> Result<(), Self::Error> {
             Ok(())
+        }
+    }
+
+    struct SocketState<'a> {
+        input: &'a [u8],
+        close_fails: bool,
+        closes: usize,
+        aborts: usize,
+    }
+
+    /// A TCP socket that reads from a fixed input, discards what is written to it, and
+    /// counts how often it is closed and aborted
+    #[derive(Clone, Copy)]
+    struct Socket<'s, 'a>(&'s RefCell<SocketState<'a>>);
+
+    impl ErrorType for Socket<'_, '_> {
+        type Error = ErrorKind;
+    }
+
+    impl Read for Socket<'_, '_> {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            let mut state = self.0.borrow_mut();
+            let len = core::cmp::min(buf.len(), state.input.len());
+            buf[..len].copy_from_slice(&state.input[..len]);
+            state.input = &state.input[len..];
+
+            Ok(len)
+        }
+    }
+
+    impl Write for Socket<'_, '_> {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            Ok(buf.len())
+        }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    impl Readable for Socket<'_, '_> {
+        async fn readable(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    impl<'s, 'a> TcpSplit for Socket<'s, 'a> {
+        type Read<'r>
+            = Socket<'s, 'a>
+        where
+            Self: 'r;
+        type Write<'r>
+            = Socket<'s, 'a>
+        where
+            Self: 'r;
+
+        fn split(&mut self) -> (Self::Read<'_>, Self::Write<'_>) {
+            (*self, *self)
+        }
+    }
+
+    impl TcpShutdown for Socket<'_, '_> {
+        async fn close(&mut self, _what: Close) -> Result<(), Self::Error> {
+            let mut state = self.0.borrow_mut();
+            state.closes += 1;
+
+            if state.close_fails {
+                Err(ErrorKind::TimedOut)
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn abort(&mut self) -> Result<(), Self::Error> {
+            self.0.borrow_mut().aborts += 1;
+
+            Ok(())
+        }
+    }
+
+    /// Answers every request with an empty 200 response
+    struct EmptyOk;
+
+    impl Handler for EmptyOk {
+        type Error<E>
+            = Error<E>
+        where
+            E: Debug;
+
+        async fn handle<T, const N: usize>(
+            &self,
+            _task_id: impl Display + Copy,
+            connection: &mut Connection<'_, T, N>,
+        ) -> Result<(), Self::Error<T::Error>>
+        where
+            T: Read + Write + TcpSplit,
+        {
+            connection
+                .initiate_response(200, Some("OK"), &[("Content-Length", "0")])
+                .await
         }
     }
 
@@ -1361,6 +1468,28 @@ mod test {
                 "HTTP/1.1 101 \r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
                  Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"
             );
+        })
+    }
+
+    #[test]
+    fn test_failed_close_aborts() {
+        block_on(async {
+            for close_fails in [false, true] {
+                let state = RefCell::new(SocketState {
+                    input: b"GET / HTTP/1.1\r\nConnection: close\r\n\r\n",
+                    close_fails,
+                    closes: 0,
+                    aborts: 0,
+                });
+
+                let mut buf = [0; 512];
+                handle_connection::<_, _, 8>(Socket(&state), &mut buf, None, 0, EmptyOk).await;
+
+                // The connection is closed, and reset only when the close fails
+                let state = state.borrow();
+                assert_eq!(state.closes, 1);
+                assert_eq!(state.aborts, usize::from(close_fails));
+            }
         })
     }
 }

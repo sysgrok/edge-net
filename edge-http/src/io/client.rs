@@ -250,8 +250,10 @@ where
                 *self = Self::Unbound(state);
 
                 if let Some(mut io) = io {
-                    io.close(Close::Both).await.map_err(Error::Io)?;
+                    // Abort also when the close fails, so that the peer gets a reset
+                    let closed = io.close(Close::Both).await;
                     let _ = io.abort().await;
+                    closed.map_err(Error::Io)?;
                 }
             }
             _ => {
@@ -268,8 +270,10 @@ where
         let res = self.complete().await;
 
         if let Some(mut io) = self.unbind().io.take() {
-            io.close(Close::Both).await.map_err(Error::Io)?;
+            // Abort also when the close fails, so that the peer gets a reset
+            let closed = io.close(Close::Both).await;
             let _ = io.abort().await;
+            closed.map_err(Error::Io)?;
         }
 
         res
@@ -510,11 +514,10 @@ where
 #[allow(clippy::large_futures)]
 mod test {
     use core::cell::RefCell;
-    use core::convert::Infallible;
     use core::net::SocketAddr;
 
     use embassy_futures::block_on;
-    use embedded_io_async::{ErrorType, Read, Write};
+    use embedded_io_async::{ErrorKind, ErrorType, Read, Write};
 
     use edge_nal::{Close, Readable, TcpConnect, TcpShutdown, TcpSplit};
 
@@ -527,6 +530,8 @@ mod test {
     struct Inner<'a> {
         input: &'a [u8],
         connects: usize,
+        close_fails: bool,
+        aborts: usize,
     }
 
     /// A network whose sockets all read from one fixed input; writes are discarded
@@ -534,7 +539,12 @@ mod test {
 
     impl<'a> MockNet<'a> {
         fn new(input: &'a [u8]) -> Self {
-            Self(RefCell::new(Inner { input, connects: 0 }))
+            Self(RefCell::new(Inner {
+                input,
+                connects: 0,
+                close_fails: false,
+                aborts: 0,
+            }))
         }
     }
 
@@ -542,7 +552,7 @@ mod test {
     struct MockSocket<'n, 'a>(&'n RefCell<Inner<'a>>);
 
     impl<'a> TcpConnect for MockNet<'a> {
-        type Error = Infallible;
+        type Error = ErrorKind;
 
         type Socket<'n>
             = MockSocket<'n, 'a>
@@ -557,7 +567,7 @@ mod test {
     }
 
     impl ErrorType for MockSocket<'_, '_> {
-        type Error = Infallible;
+        type Error = ErrorKind;
     }
 
     impl Read for MockSocket<'_, '_> {
@@ -604,10 +614,16 @@ mod test {
 
     impl TcpShutdown for MockSocket<'_, '_> {
         async fn close(&mut self, _what: Close) -> Result<(), Self::Error> {
-            Ok(())
+            if self.0.borrow().close_fails {
+                Err(ErrorKind::TimedOut)
+            } else {
+                Ok(())
+            }
         }
 
         async fn abort(&mut self) -> Result<(), Self::Error> {
+            self.0.borrow_mut().aborts += 1;
+
             Ok(())
         }
     }
@@ -620,7 +636,7 @@ mod test {
         connection: &mut Connection<'_, MockNet<'_>, 8>,
         method: Method,
         body: &mut [u8],
-    ) -> Result<(u16, usize), Error<Infallible>> {
+    ) -> Result<(u16, usize), Error<ErrorKind>> {
         connection.initiate_request(true, method, "/", &[]).await?;
         connection.initiate_response().await?;
 
@@ -764,6 +780,34 @@ mod test {
             let socket = connection.raw_connection().unwrap();
             assert_eq!(socket.read(&mut data).await, Ok(2));
             assert_eq!(&data[..2], b"ws");
+        })
+    }
+
+    #[test]
+    fn test_close_aborts() {
+        block_on(async {
+            for close_fails in [false, true] {
+                let net = MockNet::new(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+                net.0.borrow_mut().close_fails = close_fails;
+
+                let mut buf = [0; 512];
+                let mut connection = Connection::<_, 8>::new(&mut buf, &net, ADDR);
+                let mut body = [0; 16];
+
+                assert_eq!(
+                    request(&mut connection, Method::Get, &mut body).await,
+                    Ok((200, 0))
+                );
+
+                // The socket is reset also when its close fails
+                let expected = if close_fails {
+                    Err(Error::Io(ErrorKind::TimedOut))
+                } else {
+                    Ok(())
+                };
+                assert_eq!(connection.close().await, expected);
+                assert_eq!(net.0.borrow().aborts, 1);
+            }
         })
     }
 }

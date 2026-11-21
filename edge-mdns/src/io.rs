@@ -271,19 +271,33 @@ where
                 let mut send_guard = self.send.lock().await;
                 let send = &mut *send_guard;
 
-                let response = handler.lock(|handler| {
-                    handler
-                        .borrow_mut()
-                        .handle(MdnsRequest::None, send_buf.as_mut())
-                })?;
+                // An announcement can take more than one message
+                let mut current = Continuation::FIRST;
 
-                if let MdnsResponse::Reply { data, delay } = response {
+                loop {
+                    let response = handler.lock(|handler| {
+                        handler.borrow_mut().handle_part(
+                            MdnsRequest::None,
+                            current,
+                            send_buf.as_mut(),
+                        )
+                    })?;
+
+                    let Some((data, delay, next)) = Self::message(response, current) else {
+                        break;
+                    };
+
                     if delay {
                         // TODO: Not ideal, as we hold the lock during the delay
                         self.delay().await;
                     }
 
                     self.broadcast_once(send, data).await?;
+
+                    match next {
+                        Some(next) => current = next,
+                        None => break,
+                    }
                 }
             }
 
@@ -329,27 +343,35 @@ where
                     let mut send_guard = self.send.lock().await;
                     let send = &mut *send_guard;
 
-                    let response = match handler.lock(|handler| {
-                        handler.borrow_mut().handle(
-                            MdnsRequest::Request {
-                                data: &recv_buf.as_mut()[..len],
-                                legacy: remote.port() != PORT,
-                                multicast: true, // TODO: Cannot determine this
-                            },
-                            send_buf.as_mut(),
-                        )
-                    }) {
-                        Ok(len) => len,
-                        Err(err) => match err {
-                            MdnsError::InvalidMessage => {
-                                warn!("Got invalid message from {}, skipping", remote);
-                                continue;
-                            }
-                            other => Err(other)?,
-                        },
-                    };
+                    // A reply can take more than one message
+                    let mut current = Continuation::FIRST;
 
-                    if let MdnsResponse::Reply { data, delay } = response {
+                    loop {
+                        let response = match handler.lock(|handler| {
+                            handler.borrow_mut().handle_part(
+                                MdnsRequest::Request {
+                                    data: &recv_buf.as_mut()[..len],
+                                    legacy: remote.port() != PORT,
+                                    multicast: true, // TODO: Cannot determine this
+                                },
+                                current,
+                                send_buf.as_mut(),
+                            )
+                        }) {
+                            Ok(response) => response,
+                            Err(err) => match err {
+                                MdnsError::InvalidMessage => {
+                                    warn!("Got invalid message from {}, skipping", remote);
+                                    break;
+                                }
+                                other => Err(other)?,
+                            },
+                        };
+
+                        let Some((data, delay, next)) = Self::message(response, current) else {
+                            break;
+                        };
+
                         if remote.port() != PORT {
                             // Support one-shot legacy queries by replying privately
                             // to the remote address, if the query was not sent from the mDNS port (as per the spec)
@@ -377,8 +399,29 @@ where
 
                             self.broadcast_once(send, data).await?;
                         }
+
+                        match next {
+                            Some(next) => current = next,
+                            None => break,
+                        }
                     }
                 }
+            }
+        }
+    }
+
+    /// The data of the part in `response`, whether to delay it, and where the part after it
+    /// starts, if there is one.
+    fn message(
+        response: MdnsResponse<'_>,
+        current: Continuation,
+    ) -> Option<(&[u8], bool, Option<Continuation>)> {
+        match response {
+            MdnsResponse::None => None,
+            MdnsResponse::Reply { data, delay } => Some((data, delay, None)),
+            // A `next` that doesn't move on would never end
+            MdnsResponse::Partial { data, delay, next } => {
+                Some((data, delay, (next > current).then_some(next)))
             }
         }
     }

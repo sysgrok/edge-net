@@ -201,6 +201,35 @@ impl<'a> Txt<'a> {
     pub const fn new(txt: &'a [(&'a str, &'a str)]) -> Self {
         Self(txt)
     }
+
+    /// Whether `data`, a TXT record's data as read from a message, is what
+    /// `compose_rdata` writes for these key-value pairs.
+    ///
+    /// TXT data is a sequence of strings, each one preceded by its length.
+    /// `compose_rdata` writes each pair as one string, `key=value`, in order, and
+    /// no pairs as a single empty string (TXT data can't be empty). So the record's
+    /// strings, which `iter` yields without their lengths, must be exactly these,
+    /// one for each pair, with none left over.
+    fn eq_data<O: AsRef<[u8]>>(&self, data: &domain::rdata::Txt<O>) -> bool {
+        let mut strings = data.iter();
+
+        if self.0.is_empty() {
+            return strings.next() == Some(&[][..]) && strings.next().is_none();
+        }
+
+        self.0.iter().all(|(key, value)| {
+            let (key, value) = (key.as_bytes(), value.as_bytes());
+
+            // The string is `key=value` when the length is the same, and its
+            // parts are the key, `=`, and the value
+            strings.next().is_some_and(|string| {
+                string.len() == key.len() + 1 + value.len()
+                    && string[..key.len()] == *key
+                    && string[key.len()] == b'='
+                    && string[key.len() + 1..] == *value
+            })
+        }) && strings.next().is_none()
+    }
 }
 
 impl core::fmt::Display for Txt<'_> {
@@ -879,7 +908,9 @@ where
                         additional_srv_txt = true;
                     }
 
-                    if question.qname().name_eq(&answer.owner()) {
+                    if question.qname().name_eq(&answer.owner())
+                        && !contains(&ab.as_builder().as_message(), &answer)
+                    {
                         debug!(
                             "Answering question [{}] with: [{}]",
                             debug2format!(question),
@@ -908,7 +939,8 @@ where
                             | RecordDataChain::Next(AllRecordData::Srv(_))
                             | RecordDataChain::Next(AllRecordData::Txt(_))
                             | RecordDataChain::This(Txt(_))
-                    ) {
+                    ) && !contains(&aa.as_builder().as_message(), &answer)
+                    {
                         debug!("Additional answer: [{}]", debug2format!(answer));
 
                         aa.push(answer)?;
@@ -927,9 +959,11 @@ where
             let mut ab = mb.answer();
 
             self.answers.visit(|answer| {
-                ab.push(answer)?;
+                if !contains(&ab.as_builder().as_message(), &answer) {
+                    ab.push(answer)?;
 
-                pushed = true;
+                    pushed = true;
+                }
 
                 Ok::<_, MdnsError>(())
             })?;
@@ -948,6 +982,33 @@ where
             Ok(MdnsResponse::None)
         }
     }
+}
+
+/// Whether `message` has `record` already, in its answer or additional section.
+///
+/// Answers often visit the same record more than once: a `ServiceAnswers` gives its
+/// host's address records, and services of the same type give the same DNS-SD
+/// enumeration record. Records are the same when their owners, types, classes and
+/// data are; the TTL doesn't matter.
+fn contains(message: &Message<&[u8]>, record: &HostAnswer) -> bool {
+    let (Ok(answer), Ok(additional)) = (message.answer(), message.additional()) else {
+        return false;
+    };
+
+    answer.chain(additional).flatten().any(|parsed| {
+        parsed.rtype() == record.rtype()
+            && parsed.class() == record.class()
+            && parsed.owner().name_eq(record.owner())
+            && matches!(
+                parsed.to_record::<AllRecordData<_, _>>(),
+                Ok(Some(parsed)) if match record.data() {
+                    RecordDataChain::Next(data) => data == parsed.data(),
+                    RecordDataChain::This(txt) => {
+                        matches!(parsed.data(), AllRecordData::Txt(data) if txt.eq_data(data))
+                    }
+                }
+            )
+    })
 }
 
 /// A type alias for the answer which is expected to be returned by instances
@@ -1090,9 +1151,10 @@ mod test {
     use core::net::{Ipv4Addr, Ipv6Addr};
 
     use ::domain::base::iana::Rtype;
+    use ::domain::base::message::RecordSection;
     use ::domain::base::name::ParsedName;
     use ::domain::base::{Message, MessageBuilder, Ttl};
-    use ::domain::rdata::{Srv, A};
+    use ::domain::rdata::{Aaaa, Ptr, Srv, A};
 
     use crate::host::{Host, Service, ServiceAnswers};
 
@@ -1471,6 +1533,143 @@ mod test {
             .unwrap()
             .qname()
             .name_eq(&NameSlice::new(&["otherhost", "local"])));
+    }
+
+    /// Two services of one type on the host, without subtypes.
+    fn two_services() -> [Service<'static>; 2] {
+        [
+            Service {
+                name: "One",
+                priority: 0,
+                weight: 0,
+                service: "_http",
+                protocol: "_tcp",
+                port: 8080,
+                service_subtypes: &[],
+                txt_kvs: &[("path", "/one")],
+            },
+            Service {
+                name: "Two",
+                priority: 0,
+                weight: 0,
+                service: "_http",
+                protocol: "_tcp",
+                port: 8081,
+                service_subtypes: &[],
+                txt_kvs: &[("path", "/two")],
+            },
+        ]
+    }
+
+    /// How many records of each type a section has: A, AAAA, PTR, SRV, TXT.
+    fn count(section: RecordSection<'_, &[u8]>) -> [usize; 5] {
+        [
+            section.limit_to::<A>().count(),
+            section.limit_to::<Aaaa>().count(),
+            section.limit_to::<Ptr<ParsedName<&[u8]>>>().count(),
+            section.limit_to::<Srv<ParsedName<&[u8]>>>().count(),
+            section.limit_to::<::domain::rdata::Txt<&[u8]>>().count(),
+        ]
+    }
+
+    #[test]
+    fn announcement_has_each_record_once() {
+        let host = host();
+        let [one, two] = two_services();
+        let answers = NoHostAnswers
+            .chain(&host)
+            .chain(ServiceAnswers::new(&host, &one))
+            .chain(ServiceAnswers::new(&host, &two));
+        let mut handler = HostAnswersMdnsHandler::new(&answers);
+
+        let mut rbuf = [0; 1024];
+        let MdnsResponse::Reply { data, .. } =
+            handler.handle(MdnsRequest::None, &mut rbuf).unwrap()
+        else {
+            panic!("no reply");
+        };
+
+        // The host's A and AAAA records come from the host and from each service, and the
+        // DNS-SD enumeration's PTR record from each service; each goes once
+        let msg = Message::from_octets(data).unwrap();
+        assert_eq!(count(msg.answer().unwrap()), [1, 1, 3, 2, 2]);
+    }
+
+    #[test]
+    fn questions_about_one_name_get_each_answer_once() {
+        let host = host();
+        let mut handler = HostAnswersMdnsHandler::new(&host);
+
+        let mut qbuf = [0; 256];
+        let mb = MessageBuilder::from_target(Buf::new(&mut qbuf)).unwrap();
+        let mut qb = mb.question();
+        qb.push((NameSlice::new(&["myhost", "local"]), Rtype::A))
+            .unwrap();
+        qb.push((NameSlice::new(&["myhost", "local"]), Rtype::AAAA))
+            .unwrap();
+        let qlen = qb.finish().1;
+
+        let mut rbuf = [0; 512];
+        let MdnsResponse::Reply { data, .. } =
+            handle(&mut handler, false, &qbuf[..qlen], &mut rbuf)
+        else {
+            panic!("no reply");
+        };
+
+        let msg = Message::from_octets(data).unwrap();
+        assert_eq!(count(msg.answer().unwrap()), [1, 1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn additional_records_are_sent_once() {
+        let host = host();
+        let [one, two] = two_services();
+        let answers = NoHostAnswers
+            .chain(ServiceAnswers::new(&host, &one))
+            .chain(ServiceAnswers::new(&host, &two));
+        let mut handler = HostAnswersMdnsHandler::new(&answers);
+
+        let mut qbuf = [0; 256];
+        let qlen = query(
+            NameSlice::new(&["_http", "_tcp", "local"]),
+            Rtype::PTR,
+            0,
+            false,
+            &mut qbuf,
+        );
+
+        let mut rbuf = [0; 1024];
+        let MdnsResponse::Reply { data, .. } =
+            handle(&mut handler, false, &qbuf[..qlen], &mut rbuf)
+        else {
+            panic!("no reply");
+        };
+
+        // Both instances' PTR records answer; their SRV and TXT records and the host's
+        // A and AAAA records, which each service gives, are additional, once each
+        let msg = Message::from_octets(data).unwrap();
+        assert_eq!(count(msg.answer().unwrap()), [0, 0, 2, 0, 0]);
+        assert_eq!(count(msg.additional().unwrap()), [1, 1, 0, 2, 2]);
+    }
+
+    #[test]
+    fn txt_matches_its_wire_form_only() {
+        let wire = |data: &'static [u8]| ::domain::rdata::Txt::from_octets(data).unwrap();
+        let txt = Txt::new(&[("path", "/one"), ("txtvers", "1")]);
+
+        assert!(txt.eq_data(&wire(b"\x09path=/one\x09txtvers=1")));
+        // A different value, a string missing or extra, or the pairs swapped
+        assert!(!txt.eq_data(&wire(b"\x09path=/two\x09txtvers=1")));
+        assert!(!txt.eq_data(&wire(b"\x09path=/one")));
+        assert!(!txt.eq_data(&wire(b"\x09path=/one\x09txtvers=1\x03a=b")));
+        assert!(!txt.eq_data(&wire(b"\x09txtvers=1\x09path=/one")));
+        // The same bytes split another way
+        assert!(!txt.eq_data(&wire(b"\x05path=\x04/one\x09txtvers=1")));
+
+        // No pairs are one empty string
+        assert!(Txt::new(&[]).eq_data(&wire(b"\x00")));
+        assert!(!Txt::new(&[]).eq_data(&wire(b"\x03a=b")));
+        assert!(!txt.eq_data(&wire(b"\x00")));
     }
 
     #[test]

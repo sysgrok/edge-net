@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 * Unit tests for the host and service responders
 * A fix for `DoubleEndedIterator` (#104)
+* Names are compressed in the messages that `HostAnswersMdnsHandler` and `HostQuestions::query` build
 
 ## [0.8.0] - 2026-06-25
 * Breaking: update the `edge-nal` dependency

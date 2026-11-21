@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * A fix for `DoubleEndedIterator` (#104)
 * Names are compressed in the messages that `HostAnswersMdnsHandler` and `HostQuestions::query` build
 * `HostAnswersMdnsHandler` puts each record in a message once, though the answers visit it more than once (a host's address records from each of its services, the DNS-SD enumeration record from each service of a type) or several questions ask for it
+* `HostAnswersMdnsHandler` adds to a reply only the additional records related to its answers (RFC 6763, section 12): the SRV and TXT records of the service instances that PTR answers name, and the A and AAAA records of the hosts that SRV records name. It added every A, AAAA, SRV and TXT record it had to a reply to any query, whenever it had a service
 
 ## [0.8.0] - 2026-06-25
 * Breaking: update the `edge-nal` dependency

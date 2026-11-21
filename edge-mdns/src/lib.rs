@@ -18,7 +18,7 @@ use domain::base::{
     Message, MessageBuilder, ParsedName, Question, Record, RecordData, Rtype, ToName,
 };
 use domain::dep::octseq::{FreezeBuilder, FromBuilder, Octets, OctetsBuilder, ShortBuf, Truncate};
-use domain::rdata::AllRecordData;
+use domain::rdata::{AllRecordData, Ptr, Srv};
 
 // This mod MUST go first, so that the others see its macros.
 pub(crate) mod fmt;
@@ -887,27 +887,10 @@ where
                 mb.answer()
             };
 
-            let mut additional_a = false;
-            let mut additional_srv_txt = false;
-
             for question in message.question() {
                 let question = question?;
 
                 self.answers.visit(|answer| {
-                    if matches!(answer.data(), RecordDataChain::Next(AllRecordData::Srv(_))) {
-                        additional_a = true;
-                    }
-
-                    if !answer.owner().name_eq(&DNS_SD_OWNER)
-                        && matches!(answer.data(), RecordDataChain::Next(AllRecordData::Ptr(_)))
-                    {
-                        additional_a = true;
-
-                        // Over-simplifying here in that we'll send all our SRV and TXT records, however
-                        // sending only some SRV and PTR records is too complex to implement.
-                        additional_srv_txt = true;
-                    }
-
                     if question.qname().name_eq(&answer.owner())
                         && !contains(&ab.as_builder().as_message(), &answer)
                     {
@@ -926,21 +909,18 @@ where
                 })?;
             }
 
-            if additional_a || additional_srv_txt {
-                // Fill-in the additional section as well
+            // Fill-in the additional section with the records related to the answers, in two
+            // rounds: the first adds the SRV and TXT records of the service instances that PTR
+            // answers name, and the address records of the hosts that SRV answers name; the
+            // second, the address records of the hosts that the first round's SRV records name
 
-                let mut aa = ab.additional();
+            let mut aa = ab.additional();
 
+            for _ in 0..2 {
                 self.answers.visit(|answer| {
-                    if matches!(
-                        answer.data(),
-                        RecordDataChain::Next(AllRecordData::A(_))
-                            | RecordDataChain::Next(AllRecordData::Aaaa(_))
-                            | RecordDataChain::Next(AllRecordData::Srv(_))
-                            | RecordDataChain::Next(AllRecordData::Txt(_))
-                            | RecordDataChain::This(Txt(_))
-                    ) && !contains(&aa.as_builder().as_message(), &answer)
-                    {
+                    let message = aa.as_builder().as_message();
+
+                    if related(&message, &answer) && !contains(&message, &answer) {
                         debug!("Additional answer: [{}]", debug2format!(answer));
 
                         aa.push(answer)?;
@@ -948,11 +928,9 @@ where
 
                     Ok::<_, MdnsError>(())
                 })?;
-
-                aa.finish()
-            } else {
-                ab.finish()
             }
+
+            aa.finish()
         } else {
             set_header(&mut mb, 0, true);
 
@@ -981,6 +959,32 @@ where
         } else {
             Ok(MdnsResponse::None)
         }
+    }
+}
+
+/// Whether `record` is additional data for the records in `message`, as RFC 6763
+/// (section 12) has it: the SRV or TXT record of a service instance that a PTR record
+/// in the answer section names (unless it's the DNS-SD service type enumeration's), or
+/// an A or AAAA record of a host that an SRV record in the message names.
+fn related(message: &Message<&[u8]>, record: &HostAnswer) -> bool {
+    let owner = record.owner();
+
+    match record.rtype() {
+        Rtype::SRV | Rtype::TXT => message.answer().is_ok_and(|answer| {
+            answer
+                .limit_to::<Ptr<ParsedName<&[u8]>>>()
+                .flatten()
+                .any(|ptr| {
+                    !ptr.owner().name_eq(&DNS_SD_OWNER) && ptr.data().ptrdname().name_eq(owner)
+                })
+        }),
+        Rtype::A | Rtype::AAAA => [message.answer(), message.additional()]
+            .into_iter()
+            .flatten()
+            .flat_map(|section| section.limit_to::<Srv<ParsedName<&[u8]>>>())
+            .flatten()
+            .any(|srv| srv.data().target().name_eq(owner)),
+        _ => false,
     }
 }
 
@@ -1650,6 +1654,94 @@ mod test {
         let msg = Message::from_octets(data).unwrap();
         assert_eq!(count(msg.answer().unwrap()), [0, 0, 2, 0, 0]);
         assert_eq!(count(msg.additional().unwrap()), [1, 1, 0, 2, 2]);
+    }
+
+    /// What the reply to a query for `name` of type `rtype` holds: how many records of each
+    /// type, as `count` gives them, in its answer and additional sections.
+    fn reply_counts(
+        handler: &mut impl MdnsHandler,
+        name: NameSlice<'_>,
+        rtype: Rtype,
+    ) -> ([usize; 5], [usize; 5]) {
+        let mut qbuf = [0; 256];
+        let qlen = query(name, rtype, 0, false, &mut qbuf);
+
+        let mut rbuf = [0; 1024];
+        let MdnsResponse::Reply { data, .. } = handle(handler, false, &qbuf[..qlen], &mut rbuf)
+        else {
+            panic!("no reply");
+        };
+
+        let msg = Message::from_octets(data).unwrap();
+        (
+            count(msg.answer().unwrap()),
+            count(msg.additional().unwrap()),
+        )
+    }
+
+    /// A host with a service of each of two types: each reply's additional records are the
+    /// ones related to its answers.
+    #[test]
+    fn additional_records_are_those_related_to_the_answers() {
+        let host = host();
+        let web = Service {
+            name: "Web",
+            priority: 0,
+            weight: 0,
+            service: "_http",
+            protocol: "_tcp",
+            port: 8080,
+            service_subtypes: &[],
+            txt_kvs: &[("path", "/")],
+        };
+        let echo = Service {
+            name: "Echo",
+            priority: 0,
+            weight: 0,
+            service: "_echo",
+            protocol: "_udp",
+            port: 7,
+            service_subtypes: &[],
+            txt_kvs: &[("txtvers", "1")],
+        };
+        let answers = NoHostAnswers
+            .chain(&host)
+            .chain(ServiceAnswers::new(&host, &web))
+            .chain(ServiceAnswers::new(&host, &echo));
+        let mut handler = HostAnswersMdnsHandler::new(&answers);
+
+        // Browsing one type: that type's instance, with its SRV and TXT records and its
+        // host's addresses, but not the other type's
+        assert_eq!(
+            reply_counts(
+                &mut handler,
+                NameSlice::new(&["_http", "_tcp", "local"]),
+                Rtype::PTR
+            ),
+            ([0, 0, 1, 0, 0], [1, 1, 0, 1, 1])
+        );
+
+        // An instance: its SRV and TXT records, with its host's addresses
+        assert_eq!(
+            reply_counts(
+                &mut handler,
+                NameSlice::new(&["Web", "_http", "_tcp", "local"]),
+                Rtype::SRV
+            ),
+            ([0, 0, 0, 1, 1], [1, 1, 0, 0, 0])
+        );
+
+        // The host: its addresses, and nothing else
+        assert_eq!(
+            reply_counts(&mut handler, NameSlice::new(&["myhost", "local"]), Rtype::A),
+            ([1, 1, 0, 0, 0], [0; 5])
+        );
+
+        // The DNS-SD enumeration: the two types, and nothing else
+        assert_eq!(
+            reply_counts(&mut handler, DNS_SD_OWNER, Rtype::PTR),
+            ([0, 0, 2, 0, 0], [0; 5])
+        );
     }
 
     #[test]

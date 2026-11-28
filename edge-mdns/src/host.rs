@@ -3,7 +3,10 @@ use core::net::{Ipv4Addr, Ipv6Addr};
 use crate::domain::base::{iana::Class, Record, Ttl};
 use crate::domain::rdata::{Aaaa, AllRecordData, Ptr, Srv, A};
 
-use crate::{HostAnswer, HostAnswers, MdnsError, NameSlice, RecordDataChain, Txt, DNS_SD_OWNER};
+use crate::{
+    HostAnswer, HostAnswers, MdnsError, NameSlice, RecordDataChain, Txt, CLASS_IN_UNIQUE,
+    DNS_SD_OWNER,
+};
 
 /// A simple representation of a host that can be used to generate mDNS answers.
 ///
@@ -36,7 +39,7 @@ impl Host<'_> {
         if !self.ipv4.is_unspecified() {
             f(Record::new(
                 NameSlice::new(owner),
-                Class::IN,
+                CLASS_IN_UNIQUE,
                 self.ttl,
                 RecordDataChain::Next(AllRecordData::A(A::new(domain::base::net::Ipv4Addr::from(
                     self.ipv4.octets(),
@@ -47,7 +50,7 @@ impl Host<'_> {
         if !self.ipv6.is_unspecified() {
             f(Record::new(
                 NameSlice::new(owner),
-                Class::IN,
+                CLASS_IN_UNIQUE,
                 self.ttl,
                 RecordDataChain::Next(AllRecordData::Aaaa(Aaaa::new(
                     domain::base::net::Ipv6Addr::from(self.ipv6.octets()),
@@ -109,7 +112,7 @@ impl Service<'_> {
 
         f(Record::new(
             NameSlice::new(owner),
-            Class::IN,
+            CLASS_IN_UNIQUE,
             host.ttl,
             RecordDataChain::Next(AllRecordData::Srv(Srv::new(
                 self.priority,
@@ -121,7 +124,7 @@ impl Service<'_> {
 
         f(Record::new(
             NameSlice::new(owner),
-            Class::IN,
+            CLASS_IN_UNIQUE,
             host.ttl,
             RecordDataChain::This(Txt::new(self.txt_kvs)),
         ))?;

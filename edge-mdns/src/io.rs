@@ -275,13 +275,20 @@ where
                 let mut current = Continuation::FIRST;
 
                 loop {
-                    let response = handler.lock(|handler| {
+                    let response = match handler.lock(|handler| {
                         handler.borrow_mut().handle_part(
                             MdnsRequest::None,
                             current,
                             send_buf.as_mut(),
                         )
-                    })?;
+                    }) {
+                        Ok(response) => response,
+                        Err(err) => {
+                            // The error is about this announcement only, so the responder goes on
+                            warn!("Skipping the rest of an announcement: {}", err);
+                            break;
+                        }
+                    };
 
                     let Some((data, delay, next)) = Self::message(response, current) else {
                         break;
@@ -359,13 +366,11 @@ where
                             )
                         }) {
                             Ok(response) => response,
-                            Err(err) => match err {
-                                MdnsError::InvalidMessage => {
-                                    warn!("Got invalid message from {}, skipping", remote);
-                                    break;
-                                }
-                                other => Err(other)?,
-                            },
+                            Err(err) => {
+                                // The error is about this message only, so the responder goes on
+                                warn!("Skipping the message from {}: {}", remote, err);
+                                break;
+                            }
                         };
 
                         let Some((data, delay, next)) = Self::message(response, current) else {

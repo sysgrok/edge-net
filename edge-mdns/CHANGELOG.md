@@ -12,8 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * Names are compressed in the messages that `HostAnswersMdnsHandler` and `HostQuestions::query` build
 * `HostAnswersMdnsHandler` puts each record in a message once, though the answers visit it more than once (a host's address records from each of its services, the DNS-SD enumeration record from each service of a type) or several questions ask for it
 * `HostAnswersMdnsHandler` adds to a reply only the additional records related to its answers (RFC 6763, section 12): the SRV and TXT records of the service instances that PTR answers name, and the A and AAAA records of the hosts that SRV records name. It added every A, AAAA, SRV and TXT record it had to a reply to any query, whenever it had a service
-* `HostAnswersMdnsHandler` splits an announcement or a reply that doesn't fit in one message over several, and leaves out the additional records that don't fit. A reply to a legacy query is still one message, so its answers must fit in one
+* `HostAnswersMdnsHandler` splits an announcement or a reply that doesn't fit in one message over several, and leaves out the additional records that don't fit. A reply to a legacy query is still one message: it takes the answers that fit, with the TC bit set if some don't
 * Breaking: a new `MdnsResponse::Partial` variant: the first message of several, and the `Continuation` where the next starts. A new `MdnsHandler::handle_part` prepares the message at a `Continuation`; it defaults to `handle`'s one message. `Mdns` sends every message
+* `Mdns` skips an announcement or a reply that its handler fails to prepare, rather than stopping with the error
+* Fix: a service subtype's PTR record names the service instance, as DNS-SD has it; it named an extra record, which named the instance
 
 ## [0.8.0] - 2026-06-25
 * Breaking: update the `edge-nal` dependency

@@ -8,7 +8,7 @@ use core::fmt::Display;
 use core::ops::RangeBounds;
 
 use domain::base::header::Flags;
-use domain::base::iana::{Opcode, Rcode};
+use domain::base::iana::{Class, Opcode, Rcode};
 use domain::base::message::ShortMessage;
 use domain::base::message_builder::{AnswerBuilder, PushError, StaticCompressor};
 use domain::base::name::{FromStrError, Label, ToLabelIter};
@@ -674,6 +674,12 @@ where
     }
 }
 
+/// The cache-flush bit: the top bit of the rrclass of a record in a response.
+const CACHE_FLUSH: u16 = 0x8000;
+
+/// The rrclass of a unique record: `IN` with the cache-flush bit set (RFC 6762 §10.2).
+pub const CLASS_IN_UNIQUE: Class = Class::from_int(Class::IN.to_int() | CACHE_FLUSH);
+
 /// A type alias for the answer which is expected to be returned by instances
 /// implementing the `HostAnswers` trait.
 pub type HostAnswer<'a> =
@@ -686,6 +692,11 @@ pub type HostAnswer<'a> =
 ///
 /// Look at the implementation of `HostAnswers` for `host::Host` and `host::Service`
 /// for examples of this technique.
+///
+/// Records that only this entity answers for (its addresses, SRV and TXT records)
+/// should use [`CLASS_IN_UNIQUE`], so that peers replace what they have cached for
+/// that name and type rather than add to it. Shared records, such as DNS-SD service
+/// PTRs, use plain `Class::IN`.
 pub trait HostAnswers {
     /// Visits an entity that does have answers to mDNS queries.
     ///
@@ -918,6 +929,10 @@ where
 ///
 /// Typically, this structure will be used to provide answers to other peers that broadcast
 /// mDNS queries - i.e. this is the "responder" aspect of the mDNS protocol.
+///
+/// Answers keep the class their provider gave them, so a record marked with
+/// [`CLASS_IN_UNIQUE`] carries the cache-flush bit, except in replies to legacy unicast
+/// queries, where RFC 6762 §10.2 forbids it.
 pub struct HostAnswersMdnsHandler<T> {
     answers: T,
 }
@@ -989,12 +1004,18 @@ where
             };
 
             // The answers are the records that the questions' names own
-            let fill = push_answers(&self.answers, &mut ab, current.position(), |answer| {
-                message
-                    .question()
-                    .flatten()
-                    .any(|question| question.qname().name_eq(answer.owner()))
-            })?;
+            let fill = push_answers(
+                &self.answers,
+                &mut ab,
+                current.position(),
+                legacy,
+                |answer| {
+                    message
+                        .question()
+                        .flatten()
+                        .any(|question| question.qname().name_eq(answer.owner()))
+                },
+            )?;
 
             if legacy && matches!(fill, Fill::Before(_)) {
                 // A legacy querier takes one message, so its answers must fit in one
@@ -1011,6 +1032,7 @@ where
 
             for _ in 0..2 {
                 let result = self.answers.visit(|answer| {
+                    let answer = legacy_class(answer, legacy);
                     let message = aa.as_builder().as_message();
 
                     if related(&message, &answer) && !contains(&message, &answer) {
@@ -1035,7 +1057,7 @@ where
 
             let mut ab = mb.answer();
 
-            let fill = push_answers(&self.answers, &mut ab, current.position(), |_| true)?;
+            let fill = push_answers(&self.answers, &mut ab, current.position(), false, |_| true)?;
 
             (fill, ab.finish())
         };
@@ -1080,13 +1102,15 @@ impl From<MdnsError> for Stop {
 
 /// Pushes into `ab` the answers that `select` selects, from the one at index `from` on
 /// (in the order that `answers` visits them), leaving out those that the message has
-/// already, until one doesn't fit.
+/// already, until one doesn't fit. In a reply to a legacy query, the answers go without
+/// the cache-flush bit.
 ///
 /// An answer that doesn't fit into a message with no other answers is an error.
 fn push_answers<T, Target, F>(
     answers: &T,
     ab: &mut AnswerBuilder<Target>,
     from: usize,
+    legacy: bool,
     select: F,
 ) -> Result<Fill, MdnsError>
 where
@@ -1100,6 +1124,8 @@ where
     let result = answers.visit(|answer| {
         let at = index;
         index += 1;
+
+        let answer = legacy_class(answer, legacy);
 
         if at < from || !select(&answer) || contains(&ab.as_builder().as_message(), &answer) {
             return Ok(());
@@ -1177,6 +1203,16 @@ fn contains(message: &Message<&[u8]>, record: &HostAnswer) -> bool {
                 }
             )
     })
+}
+
+/// Clears the cache-flush bit in a reply to a legacy unicast query, where
+/// RFC 6762 §10.2 forbids it.
+fn legacy_class(mut answer: HostAnswer<'_>, legacy: bool) -> HostAnswer<'_> {
+    if legacy {
+        answer.set_class(Class::from_int(answer.class().to_int() & !CACHE_FLUSH));
+    }
+
+    answer
 }
 
 /// A type alias for the answer which is expected to be returned by instances
@@ -1606,6 +1642,126 @@ mod test {
         };
         let msg = Message::from_octets(data).unwrap();
         assert_eq!(msg.header_counts().ancount(), 2);
+    }
+
+    /// The rrclass of every record in the answer and additional sections, by type
+    fn classes(data: &[u8]) -> heapless::Vec<(Rtype, u16), 16> {
+        let msg = Message::from_octets(data).unwrap();
+        let answer = msg.answer().unwrap();
+        let additional = msg.additional().unwrap();
+
+        answer
+            .chain(additional)
+            .map(|record| {
+                let record = record.unwrap();
+                (record.rtype(), record.class().to_int())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn unique_records_carry_the_cache_flush_bit() {
+        let host = host();
+        let service = service();
+        let answers = ServiceAnswers::new(&host, &service);
+        let mut handler = HostAnswersMdnsHandler::new(&answers);
+
+        let unique = |(rtype, class): &(Rtype, u16)| {
+            if *rtype == Rtype::PTR {
+                *class == 0x0001
+            } else {
+                *class == 0x8001
+            }
+        };
+
+        // An announcement
+        let mut rbuf = [0; 1024];
+        let MdnsResponse::Reply { data, .. } =
+            handler.handle(MdnsRequest::None, &mut rbuf).unwrap()
+        else {
+            panic!("no reply");
+        };
+        let announced = classes(data);
+        assert!(announced.iter().any(|(rtype, _)| *rtype == Rtype::PTR));
+        assert!(announced.iter().all(unique), "{announced:?}");
+
+        // A reply to a query, additional records included
+        let mut qbuf = [0; 256];
+        let qlen = query(
+            NameSlice::new(&["_http", "_tcp", "local"]),
+            Rtype::PTR,
+            0,
+            false,
+            &mut qbuf,
+        );
+        let MdnsResponse::Reply { data, .. } =
+            handle(&mut handler, false, &qbuf[..qlen], &mut rbuf)
+        else {
+            panic!("no reply");
+        };
+        let replied = classes(data);
+        assert!(replied.iter().any(|(rtype, _)| *rtype == Rtype::A));
+        assert!(replied.iter().all(unique), "{replied:?}");
+
+        // A reply to a legacy query has no cache-flush bit at all, and has each record once
+        let MdnsResponse::Reply { data, .. } = handle(&mut handler, true, &qbuf[..qlen], &mut rbuf)
+        else {
+            panic!("no reply");
+        };
+        let legacy = classes(data);
+        assert_eq!(legacy.len(), replied.len(), "{legacy:?}");
+        assert!(
+            legacy.iter().all(|(_, class)| *class == 0x0001),
+            "{legacy:?}"
+        );
+    }
+
+    /// An A record several hosts answer for, as for a shared cluster name.
+    struct SharedA;
+
+    impl HostAnswers for SharedA {
+        fn visit<F, E>(&self, mut f: F) -> Result<(), E>
+        where
+            F: FnMut(HostAnswer) -> Result<(), E>,
+            E: From<MdnsError>,
+        {
+            f(Record::new(
+                NameSlice::new(&["cluster", "local"]),
+                Class::IN,
+                Ttl::from_secs(120),
+                RecordDataChain::Next(AllRecordData::A(A::new(domain::base::net::Ipv4Addr::new(
+                    192, 168, 1, 3,
+                )))),
+            ))
+        }
+    }
+
+    #[test]
+    fn shared_records_carry_no_cache_flush_bit() {
+        let mut handler = HostAnswersMdnsHandler::new(SharedA);
+
+        let mut rbuf = [0; 512];
+        let MdnsResponse::Reply { data, .. } =
+            handler.handle(MdnsRequest::None, &mut rbuf).unwrap()
+        else {
+            panic!("no reply");
+        };
+        assert_eq!(classes(data), [(Rtype::A, 0x0001)]);
+
+        let mut qbuf = [0; 256];
+        let qlen = query(
+            NameSlice::new(&["cluster", "local"]),
+            Rtype::A,
+            0,
+            false,
+            &mut qbuf,
+        );
+        let MdnsResponse::Reply { data, .. } =
+            handle(&mut handler, false, &qbuf[..qlen], &mut rbuf)
+        else {
+            panic!("no reply");
+        };
+        assert_eq!(classes(data), [(Rtype::A, 0x0001)]);
     }
 
     #[test]

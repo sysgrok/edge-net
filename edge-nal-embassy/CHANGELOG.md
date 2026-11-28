@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 * Fix: `TcpBuffers` and `UdpBuffers` handed out the buffers of a pool slot via references to the whole slot, aliasing each other - undefined behavior flagged by Miri; the buffers are now addressed via raw pointers projected from the slot
 * Unit tests for the socket buffers pool, runnable under Miri (`cargo miri test -p edge-nal-embassy --all-features`); CI runs them under Miri
+* Fix: `TcpAccept::accept` panicked when a connection closed (a reset, or the interface losing its address) before `accept` returned it; it now listens for the next connection (#112)
+* Fix: `TcpAccept::accept` returned the local address instead of the peer's
+* Fix: a peer that went quiet during the handshake held a socket that `accept` waits on for good; `accept` gives up on it after 10 s
+* The connection-reset errors map to `ErrorKind::ConnectionReset`, and a connect timeout to `ErrorKind::TimedOut`
 
 ## [0.9.0] - 2026-06-25
 * Breaking: new trait: `UdpSplitMulticast` which is now required on the socket provided by `UdpBind` and `UdpConnect`

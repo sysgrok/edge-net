@@ -10,6 +10,10 @@ socket traits (`Read` / `Write` / `Readable` / `TcpSplit` / `TcpShutdown`) over 
 This makes it possible to run any `edge-nal`-based protocol (e.g. `edge-http`) over a TLS connection,
 regardless of the underlying TCP stack (`edge-nal-std`, `edge-nal-embassy`, ...).
 
+With the `dtls` feature, the crate also implements `edge-nal`'s UDP socket traits (`UdpReceive` / `UdpSend` /
+`Readable` / `UdpSocket`) over DTLS, by layering `mbedtls-rs` on top of an existing `edge-nal` UDP socket
+(`edge-nal-std`, `edge-nal-embassy`, `edge-nal-openthread`, ...).
+
 ## Usage
 
 - `TlsConnector` wraps a `TcpConnect` transport and produces TLS client sockets.
@@ -20,3 +24,32 @@ Both return a `TlsSocket`, a thin newtype wrapper around `mbedtls-rs`'s `Session
 
 A single active `mbedtls::Tls` instance is required to drive the TLS stack; see the `mbedtls-rs`
 documentation for details.
+
+## DTLS
+
+- `UdpDatagram` wraps an `edge-nal` UDP socket (bound or connected) and the address of the peer. It is the
+  transport of an `mbedtls-rs` DTLS session (`mbedtls::dtls::Session`). It sends each datagram to the peer,
+  and drops the datagrams that come from other addresses.
+- `DtlsSocket` wraps such a session and implements the `edge-nal` UDP socket traits, as a UDP socket
+  connected to the peer.
+
+```rust
+let socket = stack.bind(local).await?;
+
+let mut socket = DtlsSocket::new(mbedtls::dtls::Session::new(
+    tls.reference(),
+    UdpDatagram::new(socket, server),
+    mbedtls::dtls::EmbassyClock,
+    &mbedtls::SessionConfig::Client(config),
+    &mbedtls::dtls::DtlsConfig::new(),
+)?);
+
+socket.send(server, b"hello").await?;
+```
+
+Notes:
+- Unlike with a plain UDP socket, `DtlsSocket::receive` does not drop the data of a record that does not fit
+  in the buffer: the next `receive` returns it.
+- A DTLS server needs the address of its client before the handshake, because it checks it with a cookie
+  first (`mbedtls::dtls::CookieCheck`). `UdpDatagram` does not learn this address from the first datagram.
+- On ESP-IDF, the `dtls` feature also needs `CONFIG_MBEDTLS_SSL_PROTO_DTLS`.

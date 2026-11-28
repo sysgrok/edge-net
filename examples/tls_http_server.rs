@@ -55,10 +55,13 @@ async fn run(server: &mut TlsServer) -> Result<(), anyhow::Error> {
     let tls = unsafe { Tls::new_local_borrows(&mut rng) }.unwrap();
 
     let cert = Certificate::new_no_copy(CERT).unwrap();
-    let config = ServerSessionConfig::new(Credentials {
-        certificate: cert,
-        private_key: PrivateKey::new(X509::DER(KEY), None).unwrap(),
-    });
+    let config = ServerSessionConfig::new(
+        Credentials {
+            certificate: cert,
+            private_key: PrivateKey::new(X509::DER(KEY), None).unwrap(),
+        }
+        .into(),
+    );
 
     // First, create a plain TCP acceptor on the `edge-nal` stack
     let tcp_acceptor = edge_nal_std::Stack::new()

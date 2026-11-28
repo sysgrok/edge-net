@@ -9,13 +9,21 @@ use edge_nal::{Close, Readable, TcpBind, TcpConnect, TcpShutdown, TcpSplit};
 
 use embassy_futures::join::join;
 
-use embassy_net::tcp::{AcceptError, ConnectError, Error, TcpReader, TcpWriter};
+use embassy_net::tcp::{AcceptError, ConnectError, Error, State, TcpReader, TcpWriter};
 use embassy_net::Stack;
+
+use embassy_time::Duration;
 
 use embedded_io_async::{ErrorKind, ErrorType, Read, Write};
 
 use crate::sealed::SealedDynPool;
 use crate::{to_emb_bind_socket, to_emb_socket, to_net_socket, DynPool, Pool};
+
+/// How long a peer may stay silent while a connection that `accept` waits for is set up.
+///
+/// smoltcp retransmits without a limit, so without a timeout, a peer that goes quiet
+/// during the handshake would hold the listening socket for good.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A type that implements the `TcpConnect` and `TcpBind` factory traits from `edge-nal`
 /// Uses the provided Embassy networking stack and TCP buffers pool to create TCP sockets.
@@ -98,16 +106,28 @@ impl edge_nal::TcpAccept for TcpAccept<'_> {
         Self: 'a;
 
     async fn accept(&self) -> Result<(SocketAddr, Self::Socket<'_>), Self::Error> {
+        let local = to_emb_bind_socket(self.local).ok_or(TcpError::UnsupportedProto)?;
+
         let mut socket = TcpSocket::new(self.stack.stack, self.stack.buffers)?;
+        socket.socket.set_timeout(Some(HANDSHAKE_TIMEOUT));
 
-        socket
-            .socket
-            .accept(to_emb_bind_socket(self.local).ok_or(TcpError::UnsupportedProto)?)
-            .await?;
+        loop {
+            socket.socket.accept(local).await?;
 
-        let local_endpoint = unwrap!(socket.socket.local_endpoint());
+            // The connection can be gone by now: reset by the peer, timed out in the
+            // handshake, or closed as the interface lost its address. Then the socket
+            // listens for the next one
+            match (socket.socket.state(), socket.socket.remote_endpoint()) {
+                (State::Closed, _) | (_, None) => {
+                    debug!("A connection closed before it was accepted, listening again");
+                }
+                (_, Some(remote)) => {
+                    socket.socket.set_timeout(None);
 
-        Ok((to_net_socket(local_endpoint), socket))
+                    return Ok((to_net_socket(remote), socket));
+                }
+            }
+        }
     }
 }
 
@@ -388,7 +408,10 @@ impl core::error::Error for TcpError {}
 impl embedded_io_async::Error for TcpError {
     fn kind(&self) -> ErrorKind {
         match self {
-            TcpError::General(_) => ErrorKind::Other,
+            TcpError::General(Error::ConnectionReset)
+            | TcpError::Connect(ConnectError::ConnectionReset)
+            | TcpError::Accept(AcceptError::ConnectionReset) => ErrorKind::ConnectionReset,
+            TcpError::Connect(ConnectError::TimedOut) => ErrorKind::TimedOut,
             TcpError::Connect(_) => ErrorKind::Other,
             TcpError::Accept(_) => ErrorKind::Other,
             TcpError::NoBuffers => ErrorKind::OutOfMemory,
@@ -528,5 +551,89 @@ mod test {
         // Dropping the socket returns its buffers to the pool
         drop(socket);
         assert!(TcpSocket::new(stack, &pool).is_ok());
+    }
+
+    /// A connection that the peer resets before `accept` gets to it is skipped, and
+    /// `accept` returns the next one, with the address of its peer.
+    #[cfg(all(feature = "medium-ethernet", feature = "proto-ipv4"))]
+    #[test]
+    fn accept_skips_a_connection_reset_before_it() {
+        use core::net::SocketAddr;
+        use core::pin::pin;
+
+        use edge_nal::{TcpAccept as _, TcpBind as _, TcpConnect as _};
+
+        use embassy_futures::join::join;
+        use embassy_futures::select::{select3, Either3};
+        use embassy_futures::{block_on, poll_once, yield_now};
+
+        use crate::{to_emb_socket, to_net_socket};
+
+        use super::Tcp;
+
+        /// Lets the packets in flight reach the other stack.
+        async fn settle() {
+            for _ in 0..8 {
+                yield_now().await;
+            }
+        }
+
+        let (server_driver, client_driver) = crate::test::pipe();
+
+        let mut server_resources = StackResources::<4>::new();
+        let (server_stack, mut server_runner) =
+            crate::test::stack_on(server_driver, 1, &mut server_resources);
+
+        let mut client_resources = StackResources::<4>::new();
+        let (client_stack, mut client_runner) =
+            crate::test::stack_on(client_driver, 2, &mut client_resources);
+
+        let server_buffers = TcpBuffers::<1, 256, 256>::new();
+        let client_buffers = TcpBuffers::<2, 256, 256>::new();
+
+        let server = Tcp::new(server_stack, &server_buffers);
+        let client = Tcp::new(client_stack, &client_buffers);
+
+        let local = SocketAddr::from(([10, 0, 0, 1], 80));
+
+        let scenario = async {
+            let acceptor = server.bind(local).await.unwrap();
+            let mut accept = pin!(acceptor.accept());
+
+            // The server listens
+            assert!(poll_once(&mut accept).is_pending());
+
+            // A client connects, and resets the connection once the server has it, while
+            // nothing polls `accept`
+            let mut socket = TcpSocket::new(client_stack, &client_buffers).unwrap();
+            socket
+                .socket
+                .connect(to_emb_socket(local).unwrap())
+                .await
+                .unwrap();
+            settle().await;
+
+            socket.abort().await.unwrap();
+            settle().await;
+            drop(socket);
+
+            // `accept` waits for the next connection...
+            assert!(poll_once(&mut accept).is_pending());
+
+            // ...and returns it, with the address of its peer
+            let (accepted, connected) = join(&mut accept, client.connect(local)).await;
+            let (remote, _accepted) = accepted.unwrap();
+            let connected = connected.unwrap();
+
+            assert_eq!(
+                Some(remote),
+                connected.socket.local_endpoint().map(to_net_socket)
+            );
+        };
+
+        match block_on(select3(server_runner.run(), client_runner.run(), scenario)) {
+            Either3::Third(()) => (),
+            _ => unreachable!(),
+        }
     }
 }

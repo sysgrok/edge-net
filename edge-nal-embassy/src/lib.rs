@@ -172,7 +172,14 @@ pub(crate) fn to_emb_addr(addr: IpAddr) -> Option<IpAddress> {
 
 #[cfg(test)]
 pub(crate) mod test {
+    extern crate std;
+
+    #[cfg(feature = "medium-ethernet")]
+    use core::cell::RefCell;
     use core::task::Context;
+
+    #[cfg(feature = "medium-ethernet")]
+    use std::{collections::VecDeque, rc::Rc, vec, vec::Vec};
 
     use embassy_net::driver::{Capabilities, Driver, HardwareAddress, LinkState, RxToken, TxToken};
     use embassy_net::{
@@ -257,14 +264,120 @@ pub(crate) mod test {
         }
     }
 
+    /// One end of an in-memory Ethernet link between two stacks: what one end sends, the
+    /// other receives.
+    ///
+    /// Used by the tests that need two stacks to actually communicate. Nothing is woken
+    /// when a packet arrives, so the stacks' runners must be busy-polled, as
+    /// `embassy_futures::block_on` does.
+    #[cfg(feature = "medium-ethernet")]
+    pub(crate) struct PipeDriver {
+        mac: [u8; 6],
+        tx: Rc<RefCell<VecDeque<Vec<u8>>>>,
+        rx: Rc<RefCell<VecDeque<Vec<u8>>>>,
+    }
+
+    /// A packet that a `PipeDriver` received.
+    #[cfg(feature = "medium-ethernet")]
+    pub(crate) struct PipeRx(Vec<u8>);
+
+    /// A packet that a `PipeDriver` sends to the other end.
+    #[cfg(feature = "medium-ethernet")]
+    pub(crate) struct PipeTx<'a>(&'a RefCell<VecDeque<Vec<u8>>>);
+
+    #[cfg(feature = "medium-ethernet")]
+    impl RxToken for PipeRx {
+        fn consume<R, F>(mut self, f: F) -> R
+        where
+            F: FnOnce(&mut [u8]) -> R,
+        {
+            f(&mut self.0)
+        }
+    }
+
+    #[cfg(feature = "medium-ethernet")]
+    impl TxToken for PipeTx<'_> {
+        fn consume<R, F>(self, len: usize, f: F) -> R
+        where
+            F: FnOnce(&mut [u8]) -> R,
+        {
+            let mut packet = vec![0; len];
+            let result = f(&mut packet);
+
+            self.0.borrow_mut().push_back(packet);
+
+            result
+        }
+    }
+
+    #[cfg(feature = "medium-ethernet")]
+    impl Driver for PipeDriver {
+        type RxToken<'a> = PipeRx;
+        type TxToken<'a> = PipeTx<'a>;
+
+        fn receive(&mut self, _cx: &mut Context) -> Option<(PipeRx, PipeTx<'_>)> {
+            let packet = self.rx.borrow_mut().pop_front()?;
+
+            Some((PipeRx(packet), PipeTx(&self.tx)))
+        }
+
+        fn transmit(&mut self, _cx: &mut Context) -> Option<PipeTx<'_>> {
+            Some(PipeTx(&self.tx))
+        }
+
+        fn link_state(&mut self, _cx: &mut Context) -> LinkState {
+            LinkState::Up
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            let mut caps = Capabilities::default();
+            caps.max_transmission_unit = 1514;
+
+            caps
+        }
+
+        fn hardware_address(&self) -> HardwareAddress {
+            HardwareAddress::Ethernet(self.mac)
+        }
+    }
+
+    /// The two ends of an in-memory Ethernet link.
+    #[cfg(feature = "medium-ethernet")]
+    pub(crate) fn pipe() -> (PipeDriver, PipeDriver) {
+        let a = Rc::new(RefCell::new(VecDeque::new()));
+        let b = Rc::new(RefCell::new(VecDeque::new()));
+
+        (
+            PipeDriver {
+                mac: [2, 0, 0, 0, 0, 1],
+                tx: a.clone(),
+                rx: b.clone(),
+            },
+            PipeDriver {
+                mac: [2, 0, 0, 0, 0, 2],
+                tx: b,
+                rx: a,
+            },
+        )
+    }
+
     /// Create a `Stack` backed by `DummyDriver`, for the socket tests.
     pub(crate) fn stack<const SOCK: usize>(
         resources: &mut StackResources<SOCK>,
     ) -> (Stack<'_>, Runner<'_, DummyDriver>) {
+        stack_on(DummyDriver, 1, resources)
+    }
+
+    /// Create a `Stack` backed by `driver`, with the address 10.0.0.`host`/24.
+    pub(crate) fn stack_on<D: Driver, const SOCK: usize>(
+        driver: D,
+        host: u8,
+        resources: &mut StackResources<SOCK>,
+    ) -> (Stack<'_>, Runner<'_, D>) {
         embassy_net::new(
-            DummyDriver,
+            driver,
             Config::ipv4_static(StaticConfigV4 {
-                address: Ipv4Cidr::new(Ipv4Address::new(10, 0, 0, 1), 24),
+                address: Ipv4Cidr::new(Ipv4Address::new(10, 0, 0, host), 24),
                 gateway: None,
                 dns_servers: Default::default(),
             }),

@@ -10,7 +10,7 @@ use core::ops::RangeBounds;
 use domain::base::header::Flags;
 use domain::base::iana::{Class, Opcode, Rcode};
 use domain::base::message::ShortMessage;
-use domain::base::message_builder::PushError;
+use domain::base::message_builder::{AnswerBuilder, PushError, StaticCompressor};
 use domain::base::name::{FromStrError, Label, ToLabelIter};
 use domain::base::rdata::ComposeRecordData;
 use domain::base::wire::{Composer, ParseError};
@@ -18,7 +18,7 @@ use domain::base::{
     Message, MessageBuilder, ParsedName, Question, Record, RecordData, Rtype, ToName,
 };
 use domain::dep::octseq::{FreezeBuilder, FromBuilder, Octets, OctetsBuilder, ShortBuf, Truncate};
-use domain::rdata::AllRecordData;
+use domain::rdata::{AllRecordData, Ptr, Srv};
 
 // This mod MUST go first, so that the others see its macros.
 pub(crate) mod fmt;
@@ -200,6 +200,35 @@ pub struct Txt<'a>(&'a [(&'a str, &'a str)]);
 impl<'a> Txt<'a> {
     pub const fn new(txt: &'a [(&'a str, &'a str)]) -> Self {
         Self(txt)
+    }
+
+    /// Whether `data`, a TXT record's data as read from a message, is what
+    /// `compose_rdata` writes for these key-value pairs.
+    ///
+    /// TXT data is a sequence of strings, each one preceded by its length.
+    /// `compose_rdata` writes each pair as one string, `key=value`, in order, and
+    /// no pairs as a single empty string (TXT data can't be empty). So the record's
+    /// strings, which `iter` yields without their lengths, must be exactly these,
+    /// one for each pair, with none left over.
+    fn eq_data<O: AsRef<[u8]>>(&self, data: &domain::rdata::Txt<O>) -> bool {
+        let mut strings = data.iter();
+
+        if self.0.is_empty() {
+            return strings.next() == Some(&[][..]) && strings.next().is_none();
+        }
+
+        self.0.iter().all(|(key, value)| {
+            let (key, value) = (key.as_bytes(), value.as_bytes());
+
+            // The string is `key=value` when the length is the same, and its
+            // parts are the key, `=`, and the value
+            strings.next().is_some_and(|string| {
+                string.len() == key.len() + 1 + value.len()
+                    && string[..key.len()] == *key
+                    && string[key.len()] == b'='
+                    && string[key.len() + 1..] == *value
+            })
+        }) && strings.next().is_none()
     }
 }
 
@@ -455,7 +484,43 @@ pub enum MdnsRequest<'a> {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum MdnsResponse<'a> {
     None,
-    Reply { data: &'a [u8], delay: bool },
+    Reply {
+        data: &'a [u8],
+        delay: bool,
+    },
+    /// The first part of a reply that takes more than one message: send it, then call
+    /// `MdnsHandler::handle_part` with the same request and `next` for the part after.
+    Partial {
+        data: &'a [u8],
+        delay: bool,
+        next: Continuation,
+    },
+}
+
+/// Where a part of a reply that takes more than one message starts.
+///
+/// A caller asks `MdnsHandler::handle_part` for the first part with
+/// `Continuation::FIRST`, and for each one after with the `next` that the part before
+/// came back with, in `MdnsResponse::Partial`. Only the handler knows what it holds: for
+/// `HostAnswersMdnsHandler`, the position of the next answer in the order that its answers
+/// visit them. Each `next` comes after the continuation it was prepared from.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct Continuation(usize);
+
+impl Continuation {
+    /// Where the first part starts.
+    pub const FIRST: Self = Self(0);
+
+    /// A continuation at `position`, for a handler of its own to give out.
+    pub const fn new(position: usize) -> Self {
+        Self(position)
+    }
+
+    /// Its position, for the handler that gave it out.
+    pub const fn position(self) -> usize {
+        self.0
+    }
 }
 
 /// A trait that abstracts the processing logic for an incoming mDNS message.
@@ -474,6 +539,30 @@ pub trait MdnsHandler {
         request: MdnsRequest<'_>,
         response_buf: &'a mut [u8],
     ) -> Result<MdnsResponse<'a>, MdnsError>;
+
+    /// Prepares the part of a reply that starts at `current`: the first part if `current`
+    /// is `Continuation::FIRST`, as `handle` does, else the part that a
+    /// `MdnsResponse::Partial` named as its `next`.
+    ///
+    /// By default the reply is one part, from `handle`. So a handler whose `handle` can
+    /// return `MdnsResponse::Partial` must implement this method too, and a handler that
+    /// wraps another must forward it; otherwise the parts after the first are lost.
+    ///
+    /// A handler that has nothing for a request returns `MdnsResponse::None` for each of
+    /// its parts, not only the first: `ChainedHandler` asks its first handler for every
+    /// part, and moves on to the second only when the first has nothing.
+    fn handle_part<'a>(
+        &mut self,
+        request: MdnsRequest<'_>,
+        current: Continuation,
+        response_buf: &'a mut [u8],
+    ) -> Result<MdnsResponse<'a>, MdnsError> {
+        if current == Continuation::FIRST {
+            self.handle(request, response_buf)
+        } else {
+            Ok(MdnsResponse::None)
+        }
+    }
 }
 
 impl<T> MdnsHandler for &mut T
@@ -486,6 +575,15 @@ where
         response_buf: &'a mut [u8],
     ) -> Result<MdnsResponse<'a>, MdnsError> {
         (**self).handle(request, response_buf)
+    }
+
+    fn handle_part<'a>(
+        &mut self,
+        request: MdnsRequest<'_>,
+        current: Continuation,
+        response_buf: &'a mut [u8],
+    ) -> Result<MdnsResponse<'a>, MdnsError> {
+        (**self).handle_part(request, current, response_buf)
     }
 }
 
@@ -545,14 +643,37 @@ where
         request: MdnsRequest<'_>,
         response_buf: &'a mut [u8],
     ) -> Result<MdnsResponse<'a>, MdnsError> {
-        match self.first.handle(request.clone(), response_buf)? {
-            MdnsResponse::None => self.second.handle(request, response_buf),
+        self.handle_part(request, Continuation::FIRST, response_buf)
+    }
+
+    fn handle_part<'a>(
+        &mut self,
+        request: MdnsRequest<'_>,
+        current: Continuation,
+        response_buf: &'a mut [u8],
+    ) -> Result<MdnsResponse<'a>, MdnsError> {
+        // A handler with nothing for a request has nothing for its later messages either,
+        // so the handler that prepared the first message prepares the rest
+        match self
+            .first
+            .handle_part(request.clone(), current, response_buf)?
+        {
+            MdnsResponse::None => self.second.handle_part(request, current, response_buf),
             MdnsResponse::Reply { data, delay } => {
                 let len = data.len();
 
                 Ok(MdnsResponse::Reply {
                     data: &response_buf[..len],
                     delay,
+                })
+            }
+            MdnsResponse::Partial { data, delay, next } => {
+                let len = data.len();
+
+                Ok(MdnsResponse::Partial {
+                    data: &response_buf[..len],
+                    delay,
+                    next,
                 })
             }
         }
@@ -646,7 +767,8 @@ pub trait HostQuestions {
     /// A function that constructs an mDNS query message in a `&mut [u8]` buffer
     /// using questions generated by this trait.
     fn query(&self, id: u16, buf: &mut [u8]) -> Result<usize, MdnsError> {
-        let buf = Buf(buf, 0);
+        // Names are compressed (RFC 1035, section 4.1.4), as mDNS allows (RFC 6762, section 18.14)
+        let buf = StaticCompressor::new(Buf(buf, 0));
 
         let mut mb = MessageBuilder::from_target(buf)?;
 
@@ -664,7 +786,7 @@ pub trait HostQuestions {
             Ok::<_, MdnsError>(())
         })?;
 
-        let buf = qb.finish();
+        let buf = qb.finish().into_target();
 
         if pushed {
             Ok(buf.1)
@@ -837,13 +959,28 @@ where
         request: MdnsRequest<'_>,
         response_buf: &'a mut [u8],
     ) -> Result<MdnsResponse<'a>, MdnsError> {
-        let buf = Buf(response_buf, 0);
+        self.handle_part(request, Continuation::FIRST, response_buf)
+    }
+
+    /// Prepares the part of an announcement or a reply that starts with the answer at
+    /// `current`, a position in the order that the answers visit their records. A part
+    /// takes the answers that fit in one message, and comes back as
+    /// `MdnsResponse::Partial` if more are left.
+    ///
+    /// The parts of a reply are prepared one at a time, so if the answers change in
+    /// between, a later part can skip or repeat records. Announce again after a change.
+    fn handle_part<'a>(
+        &mut self,
+        request: MdnsRequest<'_>,
+        current: Continuation,
+        response_buf: &'a mut [u8],
+    ) -> Result<MdnsResponse<'a>, MdnsError> {
+        // Names are compressed (RFC 1035, section 4.1.4), as mDNS allows (RFC 6762, section 18.14)
+        let buf = StaticCompressor::new(Buf(response_buf, 0));
 
         let mut mb = MessageBuilder::from_target(buf)?;
 
-        let mut pushed = false;
-
-        let buf = if let MdnsRequest::Request { legacy, data, .. } = request {
+        let (fill, buf) = if let MdnsRequest::Request { legacy, data, .. } = request {
             let message = Message::from_octets(data)?;
 
             if !matches!(message.header().opcode(), Opcode::QUERY)
@@ -852,6 +989,10 @@ where
             // Not a query but a response
             {
                 return Ok(MdnsResponse::None);
+            }
+
+            for question in message.question() {
+                question?;
             }
 
             let mut ab = if legacy {
@@ -871,94 +1012,214 @@ where
                 mb.answer()
             };
 
-            let mut additional_a = false;
-            let mut additional_srv_txt = false;
+            // The answers are the records that the questions' names own
+            let fill = push_answers(
+                &self.answers,
+                &mut ab,
+                current.position(),
+                legacy,
+                |answer| {
+                    message
+                        .question()
+                        .flatten()
+                        .any(|question| question.qname().name_eq(answer.owner()))
+                },
+            )?;
 
-            for question in message.question() {
-                let question = question?;
+            if legacy && matches!(fill, Fill::Before(_)) {
+                // A legacy querier takes one message: it gets the answers that fit, with the
+                // TC bit set, as in unicast DNS
+                ab.as_builder_mut().header_mut().set_tc(true);
 
-                self.answers.visit(|answer| {
-                    if matches!(answer.data(), RecordDataChain::Next(AllRecordData::Srv(_))) {
-                        additional_a = true;
-                    }
+                let Buf(buf, len) = ab.finish().into_target();
 
-                    if !answer.owner().name_eq(&DNS_SD_OWNER)
-                        && matches!(answer.data(), RecordDataChain::Next(AllRecordData::Ptr(_)))
-                    {
-                        additional_a = true;
-
-                        // Over-simplifying here in that we'll send all our SRV and TXT records, however
-                        // sending only some SRV and PTR records is too complex to implement.
-                        additional_srv_txt = true;
-                    }
-
-                    if question.qname().name_eq(&answer.owner()) {
-                        debug!(
-                            "Answering question [{}] with: [{}]",
-                            debug2format!(question),
-                            debug2format!(answer)
-                        );
-
-                        ab.push(legacy_class(answer, legacy))?;
-
-                        pushed = true;
-                    }
-
-                    Ok::<_, MdnsError>(())
-                })?;
+                return Ok(MdnsResponse::Reply {
+                    data: &buf[..len],
+                    delay: false,
+                });
             }
 
-            if additional_a || additional_srv_txt {
-                // Fill-in the additional section as well
+            // Fill-in the additional section with the records related to the answers, in two
+            // rounds: the first adds the SRV and TXT records of the service instances that PTR
+            // answers name, and the address records of the hosts that SRV answers name; the
+            // second, the address records of the hosts that the first round's SRV records name.
+            // Additional records are optional, so those that don't fit are left out.
 
-                let mut aa = ab.additional();
+            let mut aa = ab.additional();
 
-                self.answers.visit(|answer| {
-                    if matches!(
-                        answer.data(),
-                        RecordDataChain::Next(AllRecordData::A(_))
-                            | RecordDataChain::Next(AllRecordData::Aaaa(_))
-                            | RecordDataChain::Next(AllRecordData::Srv(_))
-                            | RecordDataChain::Next(AllRecordData::Txt(_))
-                            | RecordDataChain::This(Txt(_))
-                    ) {
+            for _ in 0..2 {
+                let result = self.answers.visit(|answer| {
+                    let answer = legacy_class(answer, legacy);
+                    let message = aa.as_builder().as_message();
+
+                    if related(&message, &answer) && !contains(&message, &answer) {
                         debug!("Additional answer: [{}]", debug2format!(answer));
 
-                        aa.push(legacy_class(answer, legacy))?;
+                        aa.push(answer).map_err(|_| Stop::Full(0))?;
                     }
 
-                    Ok::<_, MdnsError>(())
-                })?;
+                    Ok(())
+                });
 
-                aa.finish()
-            } else {
-                ab.finish()
+                match result {
+                    Ok(()) => (),
+                    Err(Stop::Full(_)) => break,
+                    Err(Stop::Error(err)) => return Err(err),
+                }
             }
+
+            (fill, aa.finish())
         } else {
             set_header(&mut mb, 0, true);
 
             let mut ab = mb.answer();
 
-            self.answers.visit(|answer| {
-                ab.push(answer)?;
+            let fill = push_answers(&self.answers, &mut ab, current.position(), false, |_| true)?;
 
-                pushed = true;
-
-                Ok::<_, MdnsError>(())
-            })?;
-
-            ab.finish()
+            (fill, ab.finish())
         };
 
-        if pushed {
-            Ok(MdnsResponse::Reply {
-                data: &buf.0[..buf.1],
+        let Buf(buf, len) = buf.into_target();
+        let data = &buf[..len];
+
+        Ok(match fill {
+            Fill::None => MdnsResponse::None,
+            Fill::All => MdnsResponse::Reply { data, delay: false },
+            Fill::Before(next) => MdnsResponse::Partial {
+                data,
                 delay: false,
-            })
-        } else {
-            Ok(MdnsResponse::None)
-        }
+                next: Continuation::new(next),
+            },
+        })
     }
+}
+
+/// How far `push_answers` got.
+enum Fill {
+    /// It had no answers to push.
+    None,
+    /// It pushed all of them.
+    All,
+    /// It pushed those before the one at this index, which didn't fit.
+    Before(usize),
+}
+
+/// Why a visit of the answers stopped early.
+enum Stop {
+    /// The message is full: the answer at this index didn't fit.
+    Full(usize),
+    Error(MdnsError),
+}
+
+impl From<MdnsError> for Stop {
+    fn from(err: MdnsError) -> Self {
+        Self::Error(err)
+    }
+}
+
+/// Pushes into `ab` the answers that `select` selects, from the one at index `from` on
+/// (in the order that `answers` visits them), leaving out those that the message has
+/// already, until one doesn't fit. In a reply to a legacy query, the answers go without
+/// the cache-flush bit.
+///
+/// An answer that doesn't fit into a message with no other answers is an error.
+fn push_answers<T, Target, F>(
+    answers: &T,
+    ab: &mut AnswerBuilder<Target>,
+    from: usize,
+    legacy: bool,
+    select: F,
+) -> Result<Fill, MdnsError>
+where
+    T: HostAnswers,
+    Target: Composer,
+    F: Fn(&HostAnswer) -> bool,
+{
+    let mut index = 0;
+    let mut pushed = false;
+
+    let result = answers.visit(|answer| {
+        let at = index;
+        index += 1;
+
+        let answer = legacy_class(answer, legacy);
+
+        if at < from || !select(&answer) || contains(&ab.as_builder().as_message(), &answer) {
+            return Ok(());
+        }
+
+        debug!("Answer: [{}]", debug2format!(answer));
+
+        if ab.push(answer).is_ok() {
+            pushed = true;
+
+            Ok(())
+        } else if pushed {
+            Err(Stop::Full(at))
+        } else {
+            Err(Stop::Error(MdnsError::ShortBuf))
+        }
+    });
+
+    match result {
+        Ok(()) if pushed => Ok(Fill::All),
+        Ok(()) => Ok(Fill::None),
+        Err(Stop::Full(at)) => Ok(Fill::Before(at)),
+        Err(Stop::Error(err)) => Err(err),
+    }
+}
+
+/// Whether `record` is additional data for the records in `message`, as RFC 6763
+/// (section 12) has it: the SRV or TXT record of a service instance that a PTR record
+/// in the answer section names (unless it's the DNS-SD service type enumeration's), or
+/// an A or AAAA record of a host that an SRV record in the message names.
+fn related(message: &Message<&[u8]>, record: &HostAnswer) -> bool {
+    let owner = record.owner();
+
+    match record.rtype() {
+        Rtype::SRV | Rtype::TXT => message.answer().is_ok_and(|answer| {
+            answer
+                .limit_to::<Ptr<ParsedName<&[u8]>>>()
+                .flatten()
+                .any(|ptr| {
+                    !ptr.owner().name_eq(&DNS_SD_OWNER) && ptr.data().ptrdname().name_eq(owner)
+                })
+        }),
+        Rtype::A | Rtype::AAAA => [message.answer(), message.additional()]
+            .into_iter()
+            .flatten()
+            .flat_map(|section| section.limit_to::<Srv<ParsedName<&[u8]>>>())
+            .flatten()
+            .any(|srv| srv.data().target().name_eq(owner)),
+        _ => false,
+    }
+}
+
+/// Whether `message` has `record` already, in its answer or additional section.
+///
+/// Answers often visit the same record more than once: a `ServiceAnswers` gives its
+/// host's address records, and services of the same type give the same DNS-SD
+/// enumeration record. Records are the same when their owners, types, classes and
+/// data are; the TTL doesn't matter.
+fn contains(message: &Message<&[u8]>, record: &HostAnswer) -> bool {
+    let (Ok(answer), Ok(additional)) = (message.answer(), message.additional()) else {
+        return false;
+    };
+
+    answer.chain(additional).flatten().any(|parsed| {
+        parsed.rtype() == record.rtype()
+            && parsed.class() == record.class()
+            && parsed.owner().name_eq(record.owner())
+            && matches!(
+                parsed.to_record::<AllRecordData<_, _>>(),
+                Ok(Some(parsed)) if match record.data() {
+                    RecordDataChain::Next(data) => data == parsed.data(),
+                    RecordDataChain::This(txt) => {
+                        matches!(parsed.data(), AllRecordData::Txt(data) if txt.eq_data(data))
+                    }
+                }
+            )
+    })
 }
 
 /// Clears the cache-flush bit in a reply to a legacy unicast query, where
@@ -1111,9 +1372,10 @@ mod test {
     use core::net::{Ipv4Addr, Ipv6Addr};
 
     use ::domain::base::iana::Rtype;
+    use ::domain::base::message::RecordSection;
     use ::domain::base::name::ParsedName;
     use ::domain::base::{Message, MessageBuilder, Ttl};
-    use ::domain::rdata::{Srv, A};
+    use ::domain::rdata::{Aaaa, Ptr, Srv, A};
 
     use crate::host::{Host, Service, ServiceAnswers};
 
@@ -1343,7 +1605,7 @@ mod test {
         let service = service();
         let answers = ServiceAnswers::new(&host, &service);
 
-        // Host A + AAAA, SRV, TXT, two PTRs and three records per subtype
+        // Host A + AAAA, SRV, TXT, two PTRs and two records per subtype
         let mut count = 0;
         answers
             .visit(|_| {
@@ -1351,7 +1613,7 @@ mod test {
                 Ok::<_, MdnsError>(())
             })
             .unwrap();
-        assert_eq!(count, 2 + 4 + 3);
+        assert_eq!(count, 2 + 4 + 2);
 
         // A service type query gets the PTR record, with SRV, TXT and address records as additional data
         let mut handler = HostAnswersMdnsHandler::new(&answers);
@@ -1387,6 +1649,39 @@ mod test {
             .target()
             .name_eq(&NameSlice::new(&["myhost", "local"])));
         assert!(msg.additional().unwrap().limit_to::<A>().next().is_some());
+
+        // A subtype query gets a PTR record that names the service instance, with the same
+        // additional data
+        let qlen = query(
+            NameSlice::new(&["_printer", "_sub", "_http", "_tcp", "local"]),
+            Rtype::PTR,
+            0,
+            false,
+            &mut qbuf,
+        );
+        let MdnsResponse::Reply { data, .. } =
+            handle(&mut handler, false, &qbuf[..qlen], &mut rbuf)
+        else {
+            panic!("no reply");
+        };
+
+        let msg = Message::from_octets(data).unwrap();
+        assert_eq!(msg.header_counts().ancount(), 1);
+        assert_eq!(msg.header_counts().arcount(), 4);
+
+        let ptr = msg
+            .answer()
+            .unwrap()
+            .limit_to::<Ptr<ParsedName<&[u8]>>>()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert!(ptr.data().ptrdname().name_eq(&NameSlice::new(&[
+            "My Service",
+            "_http",
+            "_tcp",
+            "local"
+        ])));
 
         // The DNS-SD enumeration query lists the service type and its subtype
         let qlen = query(DNS_SD_OWNER, Rtype::PTR, 0, false, &mut qbuf);
@@ -1458,13 +1753,13 @@ mod test {
         assert!(replied.iter().any(|(rtype, _)| *rtype == Rtype::A));
         assert!(replied.iter().all(unique), "{replied:?}");
 
-        // A reply to a legacy query has no cache-flush bit at all
+        // A reply to a legacy query has no cache-flush bit at all, and has each record once
         let MdnsResponse::Reply { data, .. } = handle(&mut handler, true, &qbuf[..qlen], &mut rbuf)
         else {
             panic!("no reply");
         };
         let legacy = classes(data);
-        assert!(!legacy.is_empty());
+        assert_eq!(legacy.len(), replied.len(), "{legacy:?}");
         assert!(
             legacy.iter().all(|(_, class)| *class == 0x0001),
             "{legacy:?}"
@@ -1517,6 +1812,605 @@ mod test {
             panic!("no reply");
         };
         assert_eq!(classes(data), [(Rtype::A, 0x0001)]);
+    }
+
+    #[test]
+    fn names_are_compressed() {
+        let host = host();
+        let service = service();
+        let answers = ServiceAnswers::new(&host, &service);
+        let mut handler = HostAnswersMdnsHandler::new(&answers);
+
+        let mut rbuf = [0; 1024];
+        let MdnsResponse::Reply { data, .. } =
+            handler.handle(MdnsRequest::None, &mut rbuf).unwrap()
+        else {
+            panic!("no reply");
+        };
+
+        // Every name ends in `local`, which is written out once, in the first owner, and once
+        // more in the SRV record's target, which `domain` doesn't compress (RFC 2782)
+        let local = data
+            .windows(6)
+            .filter(|window| *window == b"\x05local")
+            .count();
+        assert_eq!(local, 2);
+
+        // The records read back as they were
+        let msg = Message::from_octets(data).unwrap();
+        assert_eq!(msg.header_counts().ancount(), 8);
+        for record in msg.answer().unwrap() {
+            assert!(record
+                .unwrap()
+                .into_record::<AllRecordData<_, _>>()
+                .unwrap()
+                .is_some());
+        }
+        let srv = msg
+            .answer()
+            .unwrap()
+            .limit_to::<Srv<ParsedName<&[u8]>>>()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert!(srv
+            .owner()
+            .name_eq(&NameSlice::new(&["My Service", "_http", "_tcp", "local"])));
+        assert!(srv
+            .data()
+            .target()
+            .name_eq(&NameSlice::new(&["myhost", "local"])));
+    }
+
+    #[test]
+    fn query_names_are_compressed() {
+        struct Questions;
+
+        impl HostQuestions for Questions {
+            fn visit<F, E>(&self, mut f: F) -> Result<(), E>
+            where
+                F: FnMut(HostQuestion) -> Result<(), E>,
+                E: From<MdnsError>,
+            {
+                f(Question::new_in(
+                    NameSlice::new(&["myhost", "local"]),
+                    Rtype::A,
+                ))?;
+                f(Question::new_in(
+                    NameSlice::new(&["otherhost", "local"]),
+                    Rtype::AAAA,
+                ))
+            }
+        }
+
+        let mut qbuf = [0; 256];
+        let len = Questions.query(0, &mut qbuf).unwrap();
+
+        // `local` is written out once, in the first question
+        let local = qbuf[..len]
+            .windows(6)
+            .filter(|window| *window == b"\x05local")
+            .count();
+        assert_eq!(local, 1);
+
+        let msg = Message::from_octets(&qbuf[..len]).unwrap();
+        let mut questions = msg.question();
+        assert!(questions
+            .next()
+            .unwrap()
+            .unwrap()
+            .qname()
+            .name_eq(&NameSlice::new(&["myhost", "local"])));
+        assert!(questions
+            .next()
+            .unwrap()
+            .unwrap()
+            .qname()
+            .name_eq(&NameSlice::new(&["otherhost", "local"])));
+    }
+
+    /// Two services of one type on the host, without subtypes.
+    fn two_services() -> [Service<'static>; 2] {
+        [
+            Service {
+                name: "One",
+                priority: 0,
+                weight: 0,
+                service: "_http",
+                protocol: "_tcp",
+                port: 8080,
+                service_subtypes: &[],
+                txt_kvs: &[("path", "/one")],
+            },
+            Service {
+                name: "Two",
+                priority: 0,
+                weight: 0,
+                service: "_http",
+                protocol: "_tcp",
+                port: 8081,
+                service_subtypes: &[],
+                txt_kvs: &[("path", "/two")],
+            },
+        ]
+    }
+
+    /// How many records of each type a section has: A, AAAA, PTR, SRV, TXT.
+    fn count(section: RecordSection<'_, &[u8]>) -> [usize; 5] {
+        [
+            section.limit_to::<A>().count(),
+            section.limit_to::<Aaaa>().count(),
+            section.limit_to::<Ptr<ParsedName<&[u8]>>>().count(),
+            section.limit_to::<Srv<ParsedName<&[u8]>>>().count(),
+            section.limit_to::<::domain::rdata::Txt<&[u8]>>().count(),
+        ]
+    }
+
+    #[test]
+    fn announcement_has_each_record_once() {
+        let host = host();
+        let [one, two] = two_services();
+        let answers = NoHostAnswers
+            .chain(&host)
+            .chain(ServiceAnswers::new(&host, &one))
+            .chain(ServiceAnswers::new(&host, &two));
+        let mut handler = HostAnswersMdnsHandler::new(&answers);
+
+        let mut rbuf = [0; 1024];
+        let MdnsResponse::Reply { data, .. } =
+            handler.handle(MdnsRequest::None, &mut rbuf).unwrap()
+        else {
+            panic!("no reply");
+        };
+
+        // The host's A and AAAA records come from the host and from each service, and the
+        // DNS-SD enumeration's PTR record from each service; each goes once
+        let msg = Message::from_octets(data).unwrap();
+        assert_eq!(count(msg.answer().unwrap()), [1, 1, 3, 2, 2]);
+    }
+
+    #[test]
+    fn questions_about_one_name_get_each_answer_once() {
+        let host = host();
+        let mut handler = HostAnswersMdnsHandler::new(&host);
+
+        let mut qbuf = [0; 256];
+        let mb = MessageBuilder::from_target(Buf::new(&mut qbuf)).unwrap();
+        let mut qb = mb.question();
+        qb.push((NameSlice::new(&["myhost", "local"]), Rtype::A))
+            .unwrap();
+        qb.push((NameSlice::new(&["myhost", "local"]), Rtype::AAAA))
+            .unwrap();
+        let qlen = qb.finish().1;
+
+        let mut rbuf = [0; 512];
+        let MdnsResponse::Reply { data, .. } =
+            handle(&mut handler, false, &qbuf[..qlen], &mut rbuf)
+        else {
+            panic!("no reply");
+        };
+
+        let msg = Message::from_octets(data).unwrap();
+        assert_eq!(count(msg.answer().unwrap()), [1, 1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn additional_records_are_sent_once() {
+        let host = host();
+        let [one, two] = two_services();
+        let answers = NoHostAnswers
+            .chain(ServiceAnswers::new(&host, &one))
+            .chain(ServiceAnswers::new(&host, &two));
+        let mut handler = HostAnswersMdnsHandler::new(&answers);
+
+        let mut qbuf = [0; 256];
+        let qlen = query(
+            NameSlice::new(&["_http", "_tcp", "local"]),
+            Rtype::PTR,
+            0,
+            false,
+            &mut qbuf,
+        );
+
+        let mut rbuf = [0; 1024];
+        let MdnsResponse::Reply { data, .. } =
+            handle(&mut handler, false, &qbuf[..qlen], &mut rbuf)
+        else {
+            panic!("no reply");
+        };
+
+        // Both instances' PTR records answer; their SRV and TXT records and the host's
+        // A and AAAA records, which each service gives, are additional, once each
+        let msg = Message::from_octets(data).unwrap();
+        assert_eq!(count(msg.answer().unwrap()), [0, 0, 2, 0, 0]);
+        assert_eq!(count(msg.additional().unwrap()), [1, 1, 0, 2, 2]);
+    }
+
+    /// What the reply to a query for `name` of type `rtype` holds: how many records of each
+    /// type, as `count` gives them, in its answer and additional sections.
+    fn reply_counts(
+        handler: &mut impl MdnsHandler,
+        name: NameSlice<'_>,
+        rtype: Rtype,
+    ) -> ([usize; 5], [usize; 5]) {
+        let mut qbuf = [0; 256];
+        let qlen = query(name, rtype, 0, false, &mut qbuf);
+
+        let mut rbuf = [0; 1024];
+        let MdnsResponse::Reply { data, .. } = handle(handler, false, &qbuf[..qlen], &mut rbuf)
+        else {
+            panic!("no reply");
+        };
+
+        let msg = Message::from_octets(data).unwrap();
+        (
+            count(msg.answer().unwrap()),
+            count(msg.additional().unwrap()),
+        )
+    }
+
+    /// A host with a service of each of two types: each reply's additional records are the
+    /// ones related to its answers.
+    #[test]
+    fn additional_records_are_those_related_to_the_answers() {
+        let host = host();
+        let web = Service {
+            name: "Web",
+            priority: 0,
+            weight: 0,
+            service: "_http",
+            protocol: "_tcp",
+            port: 8080,
+            service_subtypes: &[],
+            txt_kvs: &[("path", "/")],
+        };
+        let echo = Service {
+            name: "Echo",
+            priority: 0,
+            weight: 0,
+            service: "_echo",
+            protocol: "_udp",
+            port: 7,
+            service_subtypes: &[],
+            txt_kvs: &[("txtvers", "1")],
+        };
+        let answers = NoHostAnswers
+            .chain(&host)
+            .chain(ServiceAnswers::new(&host, &web))
+            .chain(ServiceAnswers::new(&host, &echo));
+        let mut handler = HostAnswersMdnsHandler::new(&answers);
+
+        // Browsing one type: that type's instance, with its SRV and TXT records and its
+        // host's addresses, but not the other type's
+        assert_eq!(
+            reply_counts(
+                &mut handler,
+                NameSlice::new(&["_http", "_tcp", "local"]),
+                Rtype::PTR
+            ),
+            ([0, 0, 1, 0, 0], [1, 1, 0, 1, 1])
+        );
+
+        // An instance: its SRV and TXT records, with its host's addresses
+        assert_eq!(
+            reply_counts(
+                &mut handler,
+                NameSlice::new(&["Web", "_http", "_tcp", "local"]),
+                Rtype::SRV
+            ),
+            ([0, 0, 0, 1, 1], [1, 1, 0, 0, 0])
+        );
+
+        // The host: its addresses, and nothing else
+        assert_eq!(
+            reply_counts(&mut handler, NameSlice::new(&["myhost", "local"]), Rtype::A),
+            ([1, 1, 0, 0, 0], [0; 5])
+        );
+
+        // The DNS-SD enumeration: the two types, and nothing else
+        assert_eq!(
+            reply_counts(&mut handler, DNS_SD_OWNER, Rtype::PTR),
+            ([0, 0, 2, 0, 0], [0; 5])
+        );
+    }
+
+    /// Eight services of one type on the host, more than a small buffer holds.
+    struct Eight<'a> {
+        host: &'a Host<'a>,
+    }
+
+    const EIGHT: [&str; 8] = ["s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7"];
+
+    impl HostAnswers for Eight<'_> {
+        fn visit<F, E>(&self, mut f: F) -> Result<(), E>
+        where
+            F: FnMut(HostAnswer) -> Result<(), E>,
+            E: From<MdnsError>,
+        {
+            for (n, name) in EIGHT.iter().enumerate() {
+                let service = Service {
+                    name,
+                    priority: 0,
+                    weight: 0,
+                    service: "_http",
+                    protocol: "_tcp",
+                    port: 8000 + n as u16,
+                    service_subtypes: &[],
+                    txt_kvs: &[("path", "/index.html"), ("txtvers", "1")],
+                };
+                ServiceAnswers::new(self.host, &service).visit(&mut f)?;
+            }
+
+            Ok(())
+        }
+    }
+
+    /// The messages that a handler prepares for one request, each in a buffer of `N` bytes.
+    struct Messages<const N: usize> {
+        bufs: [[u8; N]; 8],
+        lens: [usize; 8],
+        count: usize,
+    }
+
+    impl<const N: usize> Messages<N> {
+        fn of(handler: &mut impl MdnsHandler, request: MdnsRequest<'_>) -> Self {
+            let mut messages = Self {
+                bufs: [[0; N]; 8],
+                lens: [0; 8],
+                count: 0,
+            };
+            let mut current = Continuation::FIRST;
+
+            loop {
+                let at = messages.count;
+                let (len, next) = match handler
+                    .handle_part(request.clone(), current, &mut messages.bufs[at])
+                    .unwrap()
+                {
+                    MdnsResponse::None => break,
+                    MdnsResponse::Reply { data, .. } => (data.len(), None),
+                    MdnsResponse::Partial { data, next, .. } => (data.len(), Some(next)),
+                };
+                messages.lens[at] = len;
+                messages.count += 1;
+
+                match next {
+                    Some(next) => {
+                        assert!(next > current);
+                        current = next;
+                    }
+                    None => break,
+                }
+            }
+
+            messages
+        }
+
+        fn get(&self, at: usize) -> Message<&[u8]> {
+            Message::from_octets(&self.bufs[at][..self.lens[at]]).unwrap()
+        }
+    }
+
+    /// Whether `message` has a record the same as `record`, in its answer or additional
+    /// section.
+    fn has_record(
+        message: &Message<&[u8]>,
+        record: &::domain::base::record::ParsedRecord<'_, &[u8]>,
+    ) -> bool {
+        let record = record.to_record::<AllRecordData<_, _>>().unwrap().unwrap();
+
+        message
+            .answer()
+            .unwrap()
+            .chain(message.additional().unwrap())
+            .flatten()
+            .any(|other| {
+                let other = other.to_record::<AllRecordData<_, _>>().unwrap().unwrap();
+
+                other.owner().name_eq(record.owner()) && other.data() == record.data()
+            })
+    }
+
+    #[test]
+    fn announcement_too_big_for_one_message_is_split() {
+        let host = host();
+        let answers = Eight { host: &host };
+        let mut handler = HostAnswersMdnsHandler::new(&answers);
+
+        let whole = Messages::<4096>::of(&mut handler, MdnsRequest::None);
+        assert_eq!(whole.count, 1);
+        let whole = whole.get(0);
+
+        let split = Messages::<512>::of(&mut handler, MdnsRequest::None);
+        assert!(split.count > 1);
+
+        // Every record of the whole announcement is in one of the messages
+        for record in whole.answer().unwrap().flatten() {
+            assert!((0..split.count).any(|at| has_record(&split.get(at), &record)));
+        }
+    }
+
+    #[test]
+    fn reply_too_big_for_one_message_is_split() {
+        let host = host();
+        let answers = Eight { host: &host };
+        let mut handler = HostAnswersMdnsHandler::new(&answers);
+
+        let mut qbuf = [0; 256];
+        let qlen = query(
+            NameSlice::new(&["_http", "_tcp", "local"]),
+            Rtype::PTR,
+            0,
+            false,
+            &mut qbuf,
+        );
+        let request = MdnsRequest::Request {
+            legacy: false,
+            multicast: true,
+            data: &qbuf[..qlen],
+        };
+
+        let split = Messages::<128>::of(&mut handler, request);
+        assert!(split.count > 1);
+
+        let mut pointers = 0;
+        for at in 0..split.count {
+            let msg = split.get(at);
+            pointers += msg
+                .answer()
+                .unwrap()
+                .limit_to::<Ptr<ParsedName<&[u8]>>>()
+                .count();
+
+            // Each message's SRV records are those of the instances it names
+            for srv in msg
+                .additional()
+                .unwrap()
+                .limit_to::<Srv<ParsedName<&[u8]>>>()
+                .flatten()
+            {
+                assert!(msg
+                    .answer()
+                    .unwrap()
+                    .limit_to::<Ptr<ParsedName<&[u8]>>>()
+                    .flatten()
+                    .any(|ptr| ptr.data().ptrdname().name_eq(srv.owner())));
+            }
+        }
+        assert_eq!(pointers, EIGHT.len());
+    }
+
+    #[test]
+    fn additional_records_that_dont_fit_are_left_out() {
+        let host = host();
+        let long = Service {
+            name: "Long",
+            priority: 0,
+            weight: 0,
+            service: "_http",
+            protocol: "_tcp",
+            port: 8080,
+            service_subtypes: &[],
+            txt_kvs: &[("k", "0123456789"); 20],
+        };
+        let answers = ServiceAnswers::new(&host, &long);
+        let mut handler = HostAnswersMdnsHandler::new(&answers);
+
+        let mut qbuf = [0; 256];
+        let qlen = query(
+            NameSlice::new(&["_http", "_tcp", "local"]),
+            Rtype::PTR,
+            0,
+            false,
+            &mut qbuf,
+        );
+
+        // The PTR answer and the SRV record fit; the TXT record doesn't, so it and the
+        // address records after it are left out, and the reply is one message
+        let mut rbuf = [0; 128];
+        let MdnsResponse::Reply { data, .. } =
+            handle(&mut handler, false, &qbuf[..qlen], &mut rbuf)
+        else {
+            panic!("not one message");
+        };
+        let msg = Message::from_octets(data).unwrap();
+        assert_eq!(count(msg.answer().unwrap()), [0, 0, 1, 0, 0]);
+        assert_eq!(count(msg.additional().unwrap()), [0, 0, 0, 1, 0]);
+    }
+
+    #[test]
+    fn legacy_reply_too_big_for_one_message_is_truncated() {
+        let host = host();
+        let answers = Eight { host: &host };
+        let mut handler = HostAnswersMdnsHandler::new(&answers);
+
+        let mut qbuf = [0; 256];
+        let qlen = query(
+            NameSlice::new(&["_http", "_tcp", "local"]),
+            Rtype::PTR,
+            0x4242,
+            false,
+            &mut qbuf,
+        );
+
+        // One message with the answers that fit, the TC bit, and no additional records
+        let mut rbuf = [0; 128];
+        let MdnsResponse::Reply { data, .. } = handle(&mut handler, true, &qbuf[..qlen], &mut rbuf)
+        else {
+            panic!("no reply");
+        };
+
+        let msg = Message::from_octets(data).unwrap();
+        assert_eq!(msg.header().id(), 0x4242);
+        assert!(msg.header().tc());
+        assert!((1..8).contains(&msg.header_counts().ancount()));
+        assert_eq!(msg.header_counts().arcount(), 0);
+    }
+
+    #[test]
+    fn record_too_big_for_a_message_is_an_error() {
+        let host = host();
+        let long = Service {
+            name: "Long",
+            priority: 0,
+            weight: 0,
+            service: "_http",
+            protocol: "_tcp",
+            port: 8080,
+            service_subtypes: &[],
+            txt_kvs: &[("k", "0123456789"); 20],
+        };
+        let answers = ServiceAnswers::new(&host, &long);
+        let mut handler = HostAnswersMdnsHandler::new(&answers);
+
+        // The records before the TXT record go in messages of their own, then the TXT
+        // record, of 260 bytes, doesn't fit even alone
+        let mut rbuf = [0; 128];
+        let mut current = Continuation::FIRST;
+        let err = loop {
+            match handler.handle_part(MdnsRequest::None, current, &mut rbuf) {
+                Ok(MdnsResponse::Partial { next, .. }) => current = next,
+                Ok(response) => panic!("all sent: {:?}", response),
+                Err(err) => break err,
+            }
+        };
+        assert_eq!(err, MdnsError::ShortBuf);
+    }
+
+    #[test]
+    fn chained_handlers_continue_their_replies() {
+        let host = host();
+        let answers = Eight { host: &host };
+        let mut alone = HostAnswersMdnsHandler::new(&answers);
+        let mut chained = NoHandler.chain(HostAnswersMdnsHandler::new(&answers));
+
+        let alone = Messages::<512>::of(&mut alone, MdnsRequest::None);
+        let chained = Messages::<512>::of(&mut chained, MdnsRequest::None);
+        assert!(alone.count > 1);
+        assert_eq!(alone.count, chained.count);
+        for at in 0..alone.count {
+            assert_eq!(alone.get(at).as_slice(), chained.get(at).as_slice());
+        }
+    }
+
+    #[test]
+    fn txt_matches_its_wire_form_only() {
+        let wire = |data: &'static [u8]| ::domain::rdata::Txt::from_octets(data).unwrap();
+        let txt = Txt::new(&[("path", "/one"), ("txtvers", "1")]);
+
+        assert!(txt.eq_data(&wire(b"\x09path=/one\x09txtvers=1")));
+        // A different value, a string missing or extra, or the pairs swapped
+        assert!(!txt.eq_data(&wire(b"\x09path=/two\x09txtvers=1")));
+        assert!(!txt.eq_data(&wire(b"\x09path=/one")));
+        assert!(!txt.eq_data(&wire(b"\x09path=/one\x09txtvers=1\x03a=b")));
+        assert!(!txt.eq_data(&wire(b"\x09txtvers=1\x09path=/one")));
+        // The same bytes split another way
+        assert!(!txt.eq_data(&wire(b"\x05path=\x04/one\x09txtvers=1")));
+
+        // No pairs are one empty string
+        assert!(Txt::new(&[]).eq_data(&wire(b"\x00")));
+        assert!(!Txt::new(&[]).eq_data(&wire(b"\x03a=b")));
+        assert!(!txt.eq_data(&wire(b"\x00")));
     }
 
     #[test]

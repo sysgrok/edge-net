@@ -144,21 +144,13 @@ impl Service<'_> {
         ))?;
 
         for subtype in self.service_subtypes {
-            let subtype_owner = &[subtype, self.name, self.service, self.protocol, "local"];
             let subtype = &[subtype, "_sub", self.service, self.protocol, "local"];
-
-            f(Record::new(
-                NameSlice::new(subtype_owner),
-                Class::IN,
-                host.ttl,
-                RecordDataChain::Next(AllRecordData::Ptr(Ptr::new(NameSlice::new(owner)))),
-            ))?;
 
             f(Record::new(
                 NameSlice::new(subtype),
                 Class::IN,
                 host.ttl,
-                RecordDataChain::Next(AllRecordData::Ptr(Ptr::new(NameSlice::new(subtype_owner)))),
+                RecordDataChain::Next(AllRecordData::Ptr(Ptr::new(NameSlice::new(owner)))),
             ))?;
 
             f(Record::new(

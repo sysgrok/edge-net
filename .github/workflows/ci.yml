@@ -36,6 +36,8 @@ jobs:
         run: cargo clippy --features std,defmt --no-deps -- -Dwarnings
       - name: Build | Clippy - log
         run: cargo clippy --features std,log --examples --no-deps -- -Dwarnings
+      - name: Build | Clippy - dtls
+        run: cargo clippy -p edge-nal-tls --features dtls,log --tests --no-deps -- -Dwarnings
       - name: Build | Default
         run: cargo build --features log
       - name: Build | Non-default
@@ -47,6 +49,8 @@ jobs:
       - name: Test
         # `edge-nal-embassy` needs a newer toolchain and is tested by the `embassy` job
         run: cargo test --workspace --features std --exclude edge-nal-embassy
+      - name: Test | DTLS
+        run: cargo test -p edge-nal-tls --features dtls
 
   embassy:
     name: Embassy / Requires Rust 1.91

@@ -1,6 +1,10 @@
 //! An implementation of `edge-nal`'s TCP factory traits (`TcpAccept` / `TcpConnect`)
 //! and socket traits (`Read` / `Write` / `Readable` / `TcpSplit` / `TcpShutdown`) over
 //! TLS, by layering `mbedtls-rs` on top of an existing `edge-nal` TCP transport.
+//!
+//! With the `dtls` feature, it also implements `edge-nal`'s UDP socket traits (`UdpReceive` /
+//! `UdpSend` / `Readable` / `UdpSocket`) over DTLS, by layering `mbedtls-rs` on top of an existing
+//! `edge-nal` UDP socket.
 #![no_std]
 #![allow(async_fn_in_trait)]
 #![allow(clippy::uninlined_format_args)]
@@ -16,8 +20,14 @@ use mbedtls_rs::{
     TlsReference,
 };
 
+#[cfg(feature = "dtls")]
+pub use dtls::*;
+
 // This mod MUST go first, so that the others see its macros.
 pub(crate) mod fmt;
+
+#[cfg(feature = "dtls")]
+mod dtls;
 
 /// Re-export of the `mbedtls-rs` crate, so that users don't have to explicitly depend on it
 /// to e.g. create a `Tls` instance or build the session configurations.

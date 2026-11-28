@@ -1,9 +1,9 @@
 [package]
 name = "edge-nal-tls"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.88"
-description = "An implementation of edge-nal's TCP factory and socket traits over TLS, using `mbedtls-rs`"
+description = "An implementation of edge-nal's TCP factory and socket traits over TLS, and of DTLS over edge-nal's UDP sockets, using `mbedtls-rs`"
 repository = "https://github.com/sysgrok/edge-net"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
@@ -19,6 +19,9 @@ categories = [
 # convenience. Trim it with `default-features = false` and select your own `mbedtls-rs` features.
 default = ["tls"]
 tls = ["mbedtls-rs/tls"]
+# DTLS over `edge-nal` UDP sockets (`DtlsSocket`, `UdpDatagram`), and `mbedtls::dtls::EmbassyClock`.
+# On ESP-IDF, it also needs `CONFIG_MBEDTLS_SSL_PROTO_DTLS`.
+dtls = ["mbedtls-rs/tls-proto-dtls", "mbedtls-rs/embassy-time"]
 log = ["dep:log", "mbedtls-rs/log"]
 defmt = ["dep:defmt", "mbedtls-rs/defmt"]
 
@@ -28,3 +31,16 @@ defmt = { workspace = true, default-features = false, optional = true }
 embedded-io-async = { workspace = true }
 edge-nal = { workspace = true }
 mbedtls-rs = { workspace = true, default-features = false }
+
+[dev-dependencies]
+edge-nal-std = { workspace = true }
+embassy-time = { workspace = true, features = ["std", "generic-queue-64"] }
+embassy-futures = { workspace = true }
+futures-lite = "2"
+rand = "0.10"
+# `mbedtls-rs` relies on `critical-section`; provide its std impl
+critical-section = { version = "1", features = ["std"] }
+
+[[test]]
+name = "dtls"
+required-features = ["dtls"]
